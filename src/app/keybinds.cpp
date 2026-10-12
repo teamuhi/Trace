@@ -101,6 +101,10 @@ bool triggered(const Keymap& keymap, Action action, bool repeat) {
     return fired;
 }
 
+bool triggeredIn(const Keymap& keymap, Action action, ModeContext mode, bool repeat) {
+    return contextActive(actionInfo(action).context, mode) && triggered(keymap, action, repeat);
+}
+
 std::string displayChord(const Chord& chord) {
     const bool mac = ImGui::GetIO().ConfigMacOSXBehaviors;
     std::string out;
@@ -119,6 +123,11 @@ std::string displayShortcut(const Keymap& keymap, Action action) {
             return displayChord(*slot);
     }
     return std::string();
+}
+
+bool actionMenuItem(const Keymap& keymap, const char* label, Action action, bool* selected, bool enabled) {
+    const std::string shortcut = displayShortcut(keymap, action);
+    return ImGui::MenuItem(label, shortcut.empty() ? nullptr : shortcut.c_str(), selected, enabled);
 }
 
 void setCapturing(bool capturing) {

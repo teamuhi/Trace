@@ -9,6 +9,8 @@ add_executable(trace_tests
     test_tools.cpp
     test_history.cpp
     test_image_io.cpp
+    test_file_write.cpp
+    test_project_io.cpp
     test_selection.cpp
     test_ini.cpp
     test_keymap.cpp
@@ -19,6 +21,9 @@ add_executable(trace_tests
     test_font_check.cpp
     test_i18n.cpp
     test_ui_strings.cpp
+    test_mode.cpp
+    test_layers.cpp
+    test_pixel_project.cpp
 )
 target_link_libraries(trace_tests PRIVATE trace_options trace_core trace_tools trace_io doctest::doctest)
 

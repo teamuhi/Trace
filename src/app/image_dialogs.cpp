@@ -42,9 +42,10 @@ ImVec4 toImVec4(Rgba8 c) {
 
 } // namespace
 
-void ImageDialogs::openResize(const Document& doc) {
+void ImageDialogs::openResize(const Document& doc, int maxSide) {
     if (busy() || doc.image().empty())
         return;
+    maxSide_ = std::clamp(maxSide, 1, kMaxImageSide);
     sourceWidth_ = doc.image().width();
     sourceHeight_ = doc.image().height();
     width_ = sourceWidth_;
@@ -55,9 +56,10 @@ void ImageDialogs::openResize(const Document& doc) {
     openRequested_ = true;
 }
 
-void ImageDialogs::openCanvasSize(const Document& doc) {
+void ImageDialogs::openCanvasSize(const Document& doc, int maxSide) {
     if (busy() || doc.image().empty())
         return;
+    maxSide_ = std::clamp(maxSide, 1, kMaxImageSide);
     sourceWidth_ = doc.image().width();
     sourceHeight_ = doc.image().height();
     width_ = sourceWidth_;
@@ -106,11 +108,13 @@ void ImageDialogs::drawResize(Document& doc, std::optional<Outcome>& outcome) {
         if (inputInt(tr(Str::DialogVerticalPercent), percentY_, kMinPercent, kMaxPercent) && keepAspect_)
             percentX_ = percentY_;
     } else {
-        if (inputInt(tr(Str::WordWidthPx), width_, 1, kMaxImageSide) && keepAspect_) {
-            height_ = scaledSide(sourceHeight_, static_cast<double>(width_) / static_cast<double>(sourceWidth_));
+        if (inputInt(tr(Str::WordWidthPx), width_, 1, maxSide_) && keepAspect_) {
+            height_ = std::min(scaledSide(sourceHeight_, static_cast<double>(width_) / static_cast<double>(sourceWidth_)),
+                               maxSide_);
         }
-        if (inputInt(tr(Str::WordHeightPx), height_, 1, kMaxImageSide) && keepAspect_) {
-            width_ = scaledSide(sourceWidth_, static_cast<double>(height_) / static_cast<double>(sourceHeight_));
+        if (inputInt(tr(Str::WordHeightPx), height_, 1, maxSide_) && keepAspect_) {
+            width_ = std::min(scaledSide(sourceWidth_, static_cast<double>(height_) / static_cast<double>(sourceHeight_)),
+                              maxSide_);
         }
     }
     ImGui::Checkbox(tr(Str::DialogKeepAspect), &keepAspect_);
@@ -120,12 +124,12 @@ void ImageDialogs::drawResize(Document& doc, std::optional<Outcome>& outcome) {
     ImGui::RadioButton(tr(Str::DialogSharp), &filter_, static_cast<int>(ResizeFilter::Nearest));
     ImGui::RadioButton(tr(Str::DialogSmooth), &filter_, static_cast<int>(ResizeFilter::Bilinear));
 
-    const int targetW = byPercent_ ? scaledSide(sourceWidth_, percentX_ / 100.0) : width_;
-    const int targetH = byPercent_ ? scaledSide(sourceHeight_, percentY_ / 100.0) : height_;
+    const int targetW = byPercent_ ? std::min(scaledSide(sourceWidth_, percentX_ / 100.0), maxSide_) : width_;
+    const int targetH = byPercent_ ? std::min(scaledSide(sourceHeight_, percentY_ / 100.0), maxSide_) : height_;
     ImGui::Spacing();
     ImGui::TextUnformatted(trf(Str::DialogNewSize, {std::to_string(targetW), std::to_string(targetH)}).c_str());
-    if (targetW == kMaxImageSide || targetH == kMaxImageSide)
-        ImGui::TextDisabled("%s", trf(Str::DialogMaxSide, {std::to_string(kMaxImageSide)}).c_str());
+    if (targetW == maxSide_ || targetH == maxSide_)
+        ImGui::TextDisabled("%s", trf(Str::DialogMaxSide, {std::to_string(maxSide_)}).c_str());
     ImGui::Spacing();
 
     const bool changes = targetW != sourceWidth_ || targetH != sourceHeight_;
@@ -167,8 +171,10 @@ void ImageDialogs::drawCanvasSize(Document& doc, Rgba8 secondary, std::optional<
     ImGui::TextUnformatted(
         trf(Str::DialogCurrentSize, {std::to_string(sourceWidth_), std::to_string(sourceHeight_)}).c_str());
     ImGui::Spacing();
-    inputInt(tr(Str::WordWidthPx), width_, 1, kMaxImageSide);
-    inputInt(tr(Str::WordHeightPx), height_, 1, kMaxImageSide);
+    inputInt(tr(Str::WordWidthPx), width_, 1, maxSide_);
+    inputInt(tr(Str::WordHeightPx), height_, 1, maxSide_);
+    if (maxSide_ < kMaxImageSide && (width_ == maxSide_ || height_ == maxSide_))
+        ImGui::TextDisabled("%s", trf(Str::DialogMaxSide, {std::to_string(maxSide_)}).c_str());
 
     ImGui::Spacing();
     ImGui::TextUnformatted(tr(Str::DialogAnchor));

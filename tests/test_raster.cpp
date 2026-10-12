@@ -3,6 +3,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <utility>
+#include <vector>
 
 #include "core/raster.hpp"
 
@@ -414,4 +416,114 @@ TEST_CASE("floodFill follows a long winding corridor") {
     }
     floodFill(img, 0, 0, kRed, 0);
     CHECK(count(img, kRed) == corridor);
+}
+
+// --- pixel art helpers ---------------------------------------------------------------------------
+
+TEST_CASE("forEachLinePixel visits both ends and every step in order") {
+    std::vector<std::pair<int, int>> seen;
+    forEachLinePixel(1, 1, 5, 3, [&](int x, int y) { seen.emplace_back(x, y); });
+    REQUIRE(seen.size() == 5);
+    CHECK(seen.front() == std::pair<int, int>{1, 1});
+    CHECK(seen.back() == std::pair<int, int>{5, 3});
+    for (std::size_t i = 1; i < seen.size(); ++i) {
+        CHECK(std::abs(seen[i].first - seen[i - 1].first) <= 1);
+        CHECK(std::abs(seen[i].second - seen[i - 1].second) <= 1);
+    }
+
+    seen.clear();
+    forEachLinePixel(4, 4, 4, 4, [&](int x, int y) { seen.emplace_back(x, y); });
+    CHECK(seen.size() == 1); // a single point
+
+    seen.clear();
+    forEachLinePixel(3, 0, 0, 0, [&](int x, int y) { seen.emplace_back(x, y); });
+    CHECK(seen.front() == std::pair<int, int>{3, 0}); // right to left
+    CHECK(seen.back() == std::pair<int, int>{0, 0});
+}
+
+TEST_CASE("stampSquareLine paints an exact square and clips to the image") {
+    Image img(10, 10, kWhite);
+    const IRect touched = stampSquareLine(img, 5, 5, 5, 5, 3, Paint{kRed});
+    CHECK(count(img, kRed) == 9);
+    CHECK(touched == IRect{4, 4, 7, 7});
+
+    Image corner(10, 10, kWhite);
+    stampSquareLine(corner, 0, 0, 0, 0, 4, Paint{kRed}); // covers -2..1 on both axes
+    CHECK(count(corner, kRed) == 4);
+
+    Image away(10, 10, kWhite);
+    CHECK(stampSquareLine(away, 500, 500, 600, 700, 3, Paint{kRed}).empty());
+    CHECK(count(away, kRed) == 0);
+}
+
+TEST_CASE("stampSquareLine rejects empty images, bad sizes and mismatched masks") {
+    Image empty;
+    CHECK(stampSquareLine(empty, 0, 0, 3, 3, 3, Paint{kRed}).empty());
+    Image img(8, 8, kWhite);
+    CHECK(stampSquareLine(img, 1, 1, 3, 3, 0, Paint{kRed}).empty());
+    CHECK(stampSquareLine(img, 1, 1, 3, 3, -4, Paint{kRed}).empty());
+
+    StrokeMask wrong;
+    wrong.begin(3, 3);
+    stampSquareLine(img, 1, 1, 1, 1, 1, Paint{kRed}, &wrong); // wrong size: ignored, still painted
+    CHECK(img.get(1, 1) == kRed);
+}
+
+TEST_CASE("stampSquareLine with a mask blends a translucent color once however the stamps overlap") {
+    Image img(12, 12, kWhite);
+    StrokeMask mask;
+    mask.begin(12, 12);
+    const Rgba8 half{0, 0, 0, 128};
+    stampSquareLine(img, 2, 5, 9, 5, 3, Paint{half}, &mask);
+    stampSquareLine(img, 9, 5, 2, 5, 3, Paint{half}, &mask); // back over the same pixels
+    const Rgba8 once = blendOver(kWhite, half);
+    for (int x = 1; x <= 10; ++x)
+        CHECK(img.get(x, 5) == once);
+    mask.end();
+}
+
+TEST_CASE("stampSquareLine erases alpha with the erase mode") {
+    Image img(6, 6, kWhite);
+    stampSquareLine(img, 3, 3, 3, 3, 2, Paint{Rgba8{}, BlendMode::EraseAlpha});
+    int cleared = 0;
+    for (const Rgba8& p : img.pixels())
+        cleared += p.a == 0 ? 1 : 0;
+    CHECK(cleared == 4);
+}
+
+TEST_CASE("floodFill can replace every matching pixel instead of the connected region") {
+    Image img(8, 4, kWhite);
+    for (int y = 0; y < 4; ++y)
+        img.set(4, y, kBlack); // a wall
+
+    Image connected = img;
+    floodFill(connected, 0, 0, kRed, 0, true);
+    CHECK(count(connected, kRed) == 4 * 4);
+
+    Image everywhere = img;
+    const IRect touched = floodFill(everywhere, 0, 0, kRed, 0, false);
+    CHECK(count(everywhere, kRed) == 7 * 4);
+    CHECK(count(everywhere, kBlack) == 4);
+    CHECK(touched == IRect{0, 0, 8, 4});
+}
+
+TEST_CASE("Global floodFill respects tolerance, a no-op seed and out-of-range seeds") {
+    Image img(4, 4, kWhite);
+    img.set(1, 1, Rgba8{250, 250, 250, 255});
+    img.set(2, 2, kBlack);
+
+    Image none = img;
+    CHECK(floodFill(none, 0, 0, kWhite, 0, false).empty()); // already that color
+    CHECK(floodFill(none, -1, 0, kRed, 0, false).empty());
+    CHECK(floodFill(none, 0, 9, kRed, 0, false).empty());
+
+    Image tolerant = img;
+    floodFill(tolerant, 0, 0, kRed, 10, false);
+    CHECK(tolerant.get(1, 1) == kRed);
+    CHECK(tolerant.get(2, 2) == kBlack);
+    CHECK(count(tolerant, kRed) == 15);
+
+    Image exact = img;
+    floodFill(exact, 0, 0, kRed, 0, false);
+    CHECK(exact.get(1, 1) == Rgba8{250, 250, 250, 255}); // outside tolerance 0
 }

@@ -14,8 +14,12 @@ class Document;
 // it, with an anchor). Both are ImGui modals; while one is open busy() is true and the app ignores shortcuts.
 class ImageDialogs {
 public:
-    void openResize(const Document& doc);
-    void openCanvasSize(const Document& doc);
+    // `transparentFill` is what a grown canvas starts with selected (Pixel Art grows into transparency).
+    explicit ImageDialogs(bool transparentFill = false) : fillTransparent_(transparentFill) {}
+
+    // `maxSide` is the largest width or height the dialog will accept (Paint: kMaxImageSide; Pixel Art 1024).
+    void openResize(const Document& doc, int maxSide = kMaxImageSide);
+    void openCanvasSize(const Document& doc, int maxSide = kMaxImageSide);
 
     bool busy() const noexcept { return kind_ != Kind::None; }
 
@@ -40,6 +44,7 @@ private:
 
     int sourceWidth_ = 1; // the image when the dialog opened
     int sourceHeight_ = 1;
+    int maxSide_ = kMaxImageSide;
 
     // Resize
     int byPercent_ = 1; // 1: percent, 0: pixels (an int because ImGui radio buttons edit an int)
@@ -52,7 +57,7 @@ private:
 
     // Canvas size (width_ / height_ are shared)
     int anchor_ = static_cast<int>(Anchor::Center);
-    bool fillTransparent_ = false;
+    bool fillTransparent_;
 };
 
 } // namespace trace

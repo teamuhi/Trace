@@ -27,6 +27,15 @@ public:
 
     bool gestureActive() const noexcept { return active_; }
 
+    // Why the last press did not start a gesture. A press is refused when it would edit a layer the user
+    // cannot edit: the active layer is hidden or locked. Reading pixels (Picker) and drawing a selection
+    // marquee are always allowed; moving selected pixels is not. Reset by every press.
+    enum class Refusal { None, LayerHidden, LayerLocked };
+    Refusal lastRefusal() const noexcept { return refusal_; }
+    // Counts the presses that were refused, so the UI can show one message per refused click even when two in
+    // a row have the same reason.
+    std::uint32_t refusalCount() const noexcept { return refusalCount_; }
+
     void press(Document& doc, const PointerEvent& ev);
     void drag(Document& doc, const PointerEvent& ev);
     void release(Document& doc, const PointerEvent& ev);
@@ -36,6 +45,8 @@ public:
 
     // Brush ring radius for the current tool in image pixels (0 for none).
     float cursorRadius() const noexcept;
+    // Side of the square stamp the current tool paints with (a square brush or eraser), or 0 for none.
+    int cursorSquareSize() const noexcept;
 
     static const char* name(ToolId id) noexcept;
 
@@ -47,8 +58,13 @@ private:
 
     std::array<std::unique_ptr<Tool>, kToolCount> tools_;
     ToolSettings settings_;
+    // True when starting a gesture at `ev` would change the active cel's pixels.
+    bool wouldEdit(const Document& doc, const PointerEvent& ev) const;
+
     ToolId current_ = ToolId::Pencil;
     bool active_ = false;
+    Refusal refusal_ = Refusal::None;
+    std::uint32_t refusalCount_ = 0;
     std::uint64_t gestureGeneration_ = 0;
 };
 

@@ -3,6 +3,7 @@
 #include <optional>
 #include <utility>
 
+#include "app/texture_mirror.hpp"
 #include "core/guides.hpp"
 #include "core/pattern.hpp"
 #include "core/view_transform.hpp"
@@ -10,7 +11,6 @@
 struct ImDrawList;
 struct ImVec2;
 struct SDL_Renderer;
-struct SDL_Texture;
 
 namespace trace {
 
@@ -18,8 +18,8 @@ class Document;
 class Toolbox;
 
 // Draws a Document inside the current ImGui window, handles zoom and pan, and turns mouse gestures into
-// tool presses, drags and releases. Owns the GPU texture that mirrors the document image and keeps it
-// current by uploading only the dirty rectangle.
+// tool presses, drags and releases. Keeps a TextureMirror of the document image current by uploading only the
+// dirty rectangle.
 class CanvasView {
 public:
     CanvasView() = default;
@@ -28,10 +28,10 @@ public:
     CanvasView(const CanvasView&) = delete;
     CanvasView& operator=(const CanvasView&) = delete;
 
-    void init(SDL_Renderer* renderer) noexcept { renderer_ = renderer; }
+    void init(SDL_Renderer* renderer) noexcept { mirror_.init(renderer); }
 
     // Must run before the renderer is destroyed. Safe to call repeatedly.
-    void release() noexcept;
+    void release() noexcept { mirror_.release(); }
 
     // Fills the current window's content region with the canvas.
     void draw(Document& doc, Toolbox& tools);
@@ -52,6 +52,12 @@ public:
 
     bool pixelGridEnabled() const noexcept { return showPixelGrid_; }
     void setPixelGridEnabled(bool enabled) noexcept { showPixelGrid_ = enabled; }
+    // The zoom (1.0 = 100%) from which the pixel grid and the hover outline show. Paint uses 8 (800%).
+    void setGridMinZoom(float zoom) noexcept { gridMinZoom_ = zoom; }
+
+    // Pixel art behaviour: Fit may enlarge a small picture (in whole steps) instead of stopping at 100%, and
+    // zoom commands step through whole zoom levels from 100% up so pixels stay evenly sized.
+    void setPixelArtView(bool enabled) noexcept { pixelArt_ = enabled; }
 
     // Patterns behind the image (backdrop) and behind transparent pixels, with their spacing in device pixels.
     void setPatterns(PatternStyle backdrop, PatternStyle transparency, int spacing) noexcept {
@@ -73,17 +79,15 @@ private:
     void handleViewInput(float originX, float originY, bool hovered, bool active);
     void routeGesture(Document& doc, Toolbox& tools, Vec2f mouse, bool hovered, float snapRadius);
     void zoomBy(float factor) noexcept;
+    // One zoom step toward (or away from) `anchor`: a factor normally, the next whole level in pixel art.
+    void zoomStep(Vec2f anchor, bool in, float factor) noexcept;
     void updateGuides(Document& doc, Vec2f mouse, const ImVec2& p0, const ImVec2& p1, bool hovered,
                       bool topRulerPressed, bool leftRulerPressed);
     void drawRulers(ImDrawList* dl, const ImVec2& origin, const ImVec2& p0, const ImVec2& p1, const ImVec2& imgMin,
                     float thickness, Vec2f mouse, bool showMarker) const;
     void drawGuides(ImDrawList* dl, const Document& doc, const ImVec2& p0, const ImVec2& p1, const ImVec2& imgMin) const;
 
-    SDL_Renderer* renderer_ = nullptr;
-    SDL_Texture* texture_ = nullptr;
-    int textureWidth_ = 0;
-    int textureHeight_ = 0;
-    bool textureNearest_ = true;
+    TextureMirror mirror_;
 
     ViewTransform view_;
     Vec2f viewSize_;
@@ -96,6 +100,8 @@ private:
     Vec2f lastPointer_; // last valid pointer position in view units, used if the pointer leaves the window
 
     bool showPixelGrid_ = true;
+    float gridMinZoom_ = 8.0f;
+    bool pixelArt_ = false;
     PatternStyle backdropPattern_ = PatternStyle::Solid;
     PatternStyle transparencyPattern_ = PatternStyle::Checker;
     int patternSpacing_ = kDefaultPatternSpacing;

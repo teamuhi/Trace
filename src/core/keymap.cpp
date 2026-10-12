@@ -16,42 +16,47 @@ constexpr char kSlotSeparator = '|'; // not a key token, unlike ',' and '/'
 
 // Keep the README "Keyboard shortcuts" table in sync with these defaults. A test enforces it.
 constexpr ActionInfo kActions[] = {
-    {Action::NewCanvas, "file.new", "New canvas", "File", {"Ctrl+N", nullptr}},
-    {Action::OpenFile, "file.open", "Open", "File", {"Ctrl+O", nullptr}},
-    {Action::SaveFile, "file.save", "Save", "File", {"Ctrl+S", nullptr}},
-    {Action::SaveFileAs, "file.save_as", "Save as", "File", {"Ctrl+Shift+S", nullptr}},
-    {Action::OpenSettings, "file.settings", "Settings", "File", {"Ctrl+,", nullptr}},
-    {Action::Undo, "edit.undo", "Undo", "Edit", {"Ctrl+Z", nullptr}},
-    {Action::Redo, "edit.redo", "Redo", "Edit", {"Ctrl+Y", "Ctrl+Shift+Z"}},
-    {Action::Cut, "edit.cut", "Cut", "Edit", {"Ctrl+X", nullptr}},
-    {Action::Copy, "edit.copy", "Copy", "Edit", {"Ctrl+C", nullptr}},
-    {Action::Paste, "edit.paste", "Paste", "Edit", {"Ctrl+V", nullptr}},
-    {Action::SelectAll, "edit.select_all", "Select all", "Edit", {"Ctrl+A", nullptr}},
-    {Action::Deselect, "edit.deselect", "Deselect", "Edit", {"Ctrl+D", nullptr}},
-    {Action::DeleteSelection, "edit.delete", "Delete selection", "Edit", {"Delete", nullptr}},
-    {Action::ResizeImage, "image.resize", "Resize image", "Image", {"Ctrl+Alt+I", nullptr}},
-    {Action::CanvasSize, "image.canvas_size", "Canvas size", "Image", {"Ctrl+Alt+C", nullptr}},
-    {Action::CropToSelection, "image.crop", "Crop to selection", "Image", {"Ctrl+Shift+X", nullptr}},
-    {Action::ZoomIn, "view.zoom_in", "Zoom in", "View", {"Ctrl+=", "Ctrl+Num+"}},
-    {Action::ZoomOut, "view.zoom_out", "Zoom out", "View", {"Ctrl+-", "Ctrl+Num-"}},
-    {Action::FitToWindow, "view.fit", "Fit to window", "View", {"Ctrl+0", nullptr}},
-    {Action::ActualSize, "view.actual_size", "Actual size", "View", {"Ctrl+1", nullptr}},
-    {Action::TogglePixelGrid, "view.pixel_grid", "Pixel grid", "View", {"Ctrl+'", nullptr}},
-    {Action::ToggleRulers, "view.rulers", "Rulers", "View", {"Ctrl+R", nullptr}},
-    {Action::ToggleGuides, "view.guides", "Guides", "View", {"Ctrl+;", nullptr}},
-    {Action::ToggleSnapToGuides, "view.snap_to_guides", "Snap to guides", "View", {"Ctrl+Shift+;", nullptr}},
-    {Action::ToolPencil, "tools.pencil", "Pencil", "Tools", {"P", nullptr}},
-    {Action::ToolBrush, "tools.brush", "Brush", "Tools", {"B", nullptr}},
-    {Action::ToolEraser, "tools.eraser", "Eraser", "Tools", {"E", nullptr}},
-    {Action::ToolLine, "tools.line", "Line", "Tools", {"L", nullptr}},
-    {Action::ToolRectangle, "tools.rectangle", "Rectangle", "Tools", {"R", nullptr}},
-    {Action::ToolEllipse, "tools.ellipse", "Ellipse", "Tools", {"O", nullptr}},
-    {Action::ToolFill, "tools.fill", "Fill", "Tools", {"F", nullptr}},
-    {Action::ToolPicker, "tools.picker", "Picker", "Tools", {"K", nullptr}},
-    {Action::ToolSelect, "tools.select", "Select", "Tools", {"S", nullptr}},
-    {Action::SwapColors, "tools.swap_colors", "Swap colors", "Tools", {"X", nullptr}},
-    {Action::DecreaseSize, "tools.size_down", "Decrease size", "Tools", {"[", nullptr}},
-    {Action::IncreaseSize, "tools.size_up", "Increase size", "Tools", {"]", nullptr}},
+    {Action::NewCanvas, "file.new", "New canvas", "File", ActionContext::Global, {"Ctrl+N", nullptr}},
+    {Action::OpenFile, "file.open", "Open", "File", ActionContext::Global, {"Ctrl+O", nullptr}},
+    {Action::SaveFile, "file.save", "Save", "File", ActionContext::Global, {"Ctrl+S", nullptr}},
+    {Action::SaveFileAs, "file.save_as", "Save as", "File", ActionContext::Global, {"Ctrl+Shift+S", nullptr}},
+    {Action::Export, "file.export", "Export", "File", ActionContext::Global, {"Ctrl+Shift+E", nullptr}},
+    {Action::OpenSettings, "file.settings", "Settings", "File", ActionContext::Global, {"Ctrl+,", nullptr}},
+    {Action::Undo, "edit.undo", "Undo", "Edit", ActionContext::Global, {"Ctrl+Z", nullptr}},
+    {Action::Redo, "edit.redo", "Redo", "Edit", ActionContext::Global, {"Ctrl+Y", "Ctrl+Shift+Z"}},
+    {Action::Cut, "edit.cut", "Cut", "Edit", ActionContext::Global, {"Ctrl+X", nullptr}},
+    {Action::Copy, "edit.copy", "Copy", "Edit", ActionContext::Global, {"Ctrl+C", nullptr}},
+    {Action::Paste, "edit.paste", "Paste", "Edit", ActionContext::Global, {"Ctrl+V", nullptr}},
+    {Action::SelectAll, "edit.select_all", "Select all", "Edit", ActionContext::Global, {"Ctrl+A", nullptr}},
+    {Action::Deselect, "edit.deselect", "Deselect", "Edit", ActionContext::Raster, {"Ctrl+D", nullptr}},
+    {Action::DeleteSelection, "edit.delete", "Delete selection", "Edit", ActionContext::Global, {"Delete", nullptr}},
+    {Action::ResizeImage, "image.resize", "Resize image", "Image", ActionContext::Paint, {"Ctrl+Alt+I", nullptr}},
+    {Action::CanvasSize, "image.canvas_size", "Canvas size", "Image", ActionContext::Paint, {"Ctrl+Alt+C", nullptr}},
+    {Action::CropToSelection, "image.crop", "Crop to selection", "Image", ActionContext::Paint, {"Ctrl+Shift+X", nullptr}},
+    {Action::ZoomIn, "view.zoom_in", "Zoom in", "View", ActionContext::Global, {"Ctrl+=", "Ctrl+Num+"}},
+    {Action::ZoomOut, "view.zoom_out", "Zoom out", "View", ActionContext::Global, {"Ctrl+-", "Ctrl+Num-"}},
+    {Action::FitToWindow, "view.fit", "Fit to window", "View", ActionContext::Global, {"Ctrl+0", nullptr}},
+    {Action::ActualSize, "view.actual_size", "Actual size", "View", ActionContext::Global, {"Ctrl+1", nullptr}},
+    {Action::TogglePixelGrid, "view.pixel_grid", "Pixel grid", "View", ActionContext::Raster, {"Ctrl+'", nullptr}},
+    {Action::ToggleRulers, "view.rulers", "Rulers", "View", ActionContext::Raster, {"Ctrl+R", nullptr}},
+    {Action::ToggleGuides, "view.guides", "Guides", "View", ActionContext::Raster, {"Ctrl+;", nullptr}},
+    {Action::ToggleSnapToGuides, "view.snap_to_guides", "Snap to guides", "View", ActionContext::Raster, {"Ctrl+Shift+;", nullptr}},
+    {Action::ToolPencil, "tools.pencil", "Pencil", "Tools", ActionContext::Raster, {"P", nullptr}},
+    {Action::ToolBrush, "tools.brush", "Brush", "Tools", ActionContext::Raster, {"B", nullptr}},
+    {Action::ToolEraser, "tools.eraser", "Eraser", "Tools", ActionContext::Raster, {"E", nullptr}},
+    {Action::ToolLine, "tools.line", "Line", "Tools", ActionContext::Raster, {"L", nullptr}},
+    {Action::ToolRectangle, "tools.rectangle", "Rectangle", "Tools", ActionContext::Raster, {"R", nullptr}},
+    {Action::ToolEllipse, "tools.ellipse", "Ellipse", "Tools", ActionContext::Raster, {"O", nullptr}},
+    {Action::ToolFill, "tools.fill", "Fill", "Tools", ActionContext::Raster, {"F", nullptr}},
+    {Action::ToolPicker, "tools.picker", "Picker", "Tools", ActionContext::Raster, {"K", nullptr}},
+    {Action::ToolSelect, "tools.select", "Select", "Tools", ActionContext::Raster, {"S", nullptr}},
+    {Action::SwapColors, "tools.swap_colors", "Swap colors", "Tools", ActionContext::Raster, {"X", nullptr}},
+    {Action::DecreaseSize, "tools.size_down", "Decrease size", "Tools", ActionContext::Raster, {"[", nullptr}},
+    {Action::IncreaseSize, "tools.size_up", "Increase size", "Tools", ActionContext::Raster, {"]", nullptr}},
+    {Action::ModePaint, "modes.paint", "Paint mode", "Modes", ActionContext::Global, {"Ctrl+Shift+1", nullptr}},
+    {Action::ModeFlowchart, "modes.flowchart", "Flowchart mode", "Modes", ActionContext::Global, {"Ctrl+Shift+2", nullptr}},
+    {Action::ModePixelArt, "modes.pixel_art", "Pixel Art mode", "Modes", ActionContext::Global, {"Ctrl+Shift+3", nullptr}},
+    {Action::NewLayer, "pixel.new_layer", "New layer", "Pixel Art", ActionContext::Pixel, {"Ctrl+Shift+N", nullptr}},
 };
 static_assert(std::size(kActions) == static_cast<std::size_t>(kActionCount), "one ActionInfo per Action");
 
@@ -100,6 +105,31 @@ const char* canonicalKey(std::string_view word) {
 }
 
 } // namespace
+
+bool contextActive(ActionContext ctx, ModeContext mode) noexcept {
+    switch (ctx) {
+    case ActionContext::Global:
+        return true;
+    case ActionContext::Raster:
+        return mode == ModeContext::Paint || mode == ModeContext::Pixel;
+    case ActionContext::Paint:
+        return mode == ModeContext::Paint;
+    case ActionContext::Pixel:
+        return mode == ModeContext::Pixel;
+    case ActionContext::Flow:
+        return mode == ModeContext::Flow;
+    }
+    return false;
+}
+
+bool contextsOverlap(ActionContext a, ActionContext b) noexcept {
+    // Two contexts overlap when some mode has both live.
+    for (const ModeContext mode : {ModeContext::Paint, ModeContext::Pixel, ModeContext::Flow}) {
+        if (contextActive(a, mode) && contextActive(b, mode))
+            return true;
+    }
+    return false;
+}
 
 const ActionInfo& actionInfo(Action action) {
     return kActions[static_cast<std::size_t>(action)];
@@ -183,9 +213,10 @@ bool Keymap::set(Action action, int slot, std::optional<Chord> chord) {
 }
 
 std::optional<Action> Keymap::findConflict(const Chord& chord, Action ignore) const {
+    const ActionContext context = actionInfo(ignore).context;
     for (int i = 0; i < kActionCount; ++i) {
         const Action action = static_cast<Action>(i);
-        if (action == ignore)
+        if (action == ignore || !contextsOverlap(actionInfo(action).context, context))
             continue;
         for (const auto& slot : slots_[index(action)]) {
             if (slot && *slot == chord)
@@ -226,16 +257,21 @@ void Keymap::load(const IniFile& ini) {
             slots_[index(action)] = parsed;
     }
 
-    // A hand-edited file can bind one chord twice. The earlier action keeps it.
+    // A hand-edited file can bind one chord twice. The earlier action keeps it, but only against actions that
+    // can be live at the same time: the same chord in two modes is fine.
     for (std::size_t i = 1; i < slots_.size(); ++i) {
+        const ActionContext context = kActions[i].context;
         for (auto& chord : slots_[i]) {
             if (!chord)
                 continue;
-            const auto usedEarlier = [&](const Slots& earlier) {
-                return std::find(earlier.begin(), earlier.end(), chord) != earlier.end();
-            };
-            if (std::any_of(slots_.begin(), slots_.begin() + static_cast<std::ptrdiff_t>(i), usedEarlier))
-                chord.reset();
+            for (std::size_t j = 0; j < i; ++j) {
+                if (!contextsOverlap(kActions[j].context, context))
+                    continue;
+                if (std::find(slots_[j].begin(), slots_[j].end(), chord) != slots_[j].end()) {
+                    chord.reset();
+                    break;
+                }
+            }
         }
     }
 }

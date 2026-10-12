@@ -35,6 +35,12 @@ Image canvasResized(const Image& src, int width, int height, Anchor anchor, Rgba
 // The part of `src` inside `rect` (clipped to the image). Empty when nothing is left. May throw std::bad_alloc.
 Image cropped(const Image& src, const IRect& rect);
 
+// A small copy of `src` for previews: no side above `maxSide` (at least 1), the aspect ratio kept, and an image
+// that already fits copied as it is. Each preview pixel averages a few evenly spread samples of the block it
+// covers (weighted by alpha, so transparent pixels never tint the color), which keeps the cost bounded by the
+// preview size however large the source is. Empty for an empty source. May throw std::bad_alloc.
+Image thumbnailOf(const Image& src, int maxSide);
+
 // Rounds a proportional size to at least 1 pixel (for "keep aspect ratio" fields).
 int scaledSide(int side, double factor) noexcept;
 

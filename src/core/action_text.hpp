@@ -13,7 +13,7 @@ inline Str actionString(Action action) {
     return static_cast<Str>(static_cast<int>(Str::ActionNewCanvas) + static_cast<int>(action));
 }
 
-// The translatable name of an action group ("File", "Edit", "Image", "View", "Tools").
+// The translatable name of an action group ("File", "Edit", "Image", "View", "Tools", "Modes", "Pixel Art").
 inline Str groupString(std::string_view group) {
     if (group == "File")
         return Str::GroupFile;
@@ -23,6 +23,10 @@ inline Str groupString(std::string_view group) {
         return Str::GroupImage;
     if (group == "View")
         return Str::GroupView;
+    if (group == "Modes")
+        return Str::GroupModes;
+    if (group == "Pixel Art")
+        return Str::GroupPixelArt;
     return Str::GroupTools;
 }
 

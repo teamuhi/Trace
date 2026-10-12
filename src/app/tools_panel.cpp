@@ -3,10 +3,12 @@
 #include <imgui.h>
 
 #include <algorithm>
+#include <array>
 #include <cfloat>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <span>
 #include <string>
 
 #include "app/keybinds.hpp"
@@ -70,7 +72,7 @@ void sectionLabel(Str text) {
 // Icon buttons in a fixed two-column grid, like a classic toolbar. They have no boxes: the icon itself shows
 // the state (selected = accent color, hovered = full text color, otherwise a little dimmer). The size follows
 // the font and is whole pixels so the icons stay sharp; a panel too narrow for two columns falls back to one.
-void drawToolButtons(Toolbox& tools, const Keymap& keymap) {
+void drawToolButtons(Toolbox& tools, const Keymap& keymap, std::span<const ToolId> toolset) {
     const ImGuiStyle& style = ImGui::GetStyle();
     const ThemeTokens& t = tokens();
     // Roomy cells: two columns share the panel width, and they are tall enough for a large icon.
@@ -83,8 +85,8 @@ void drawToolButtons(Toolbox& tools, const Keymap& keymap) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(gap, gap));
-    for (int i = 0; i < kToolCount; ++i) {
-        const ToolId id = static_cast<ToolId>(i);
+    for (int i = 0; i < static_cast<int>(toolset.size()); ++i) {
+        const ToolId id = toolset[static_cast<std::size_t>(i)];
         const bool selected = tools.current() == id;
         if (i % columns != 0)
             ImGui::SameLine();
@@ -127,30 +129,65 @@ void sizeSlider(Str label, int& value, int maxValue) {
                      ImGuiSliderFlags_AlwaysClamp);
 }
 
-void drawToolOptions(Toolbox& tools) {
+// Muted text that wraps at the panel's right edge, for the pixel art hints (translations can be longer).
+void hintWrapped(const char* text) {
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextDisabled("%s", text);
+    ImGui::PopTextWrapPos();
+}
+
+// Round or square tip of the brush and eraser.
+void tipShapeOptions(ToolSettings& s) {
+    ImGui::TextUnformatted(tr(Str::OptBrushShape));
+    int square = s.squareBrush ? 1 : 0;
+    ImGui::RadioButton(tr(Str::OptRound), &square, 0);
+    ImGui::SameLine();
+    ImGui::RadioButton(tr(Str::OptSquare), &square, 1);
+    s.squareBrush = square != 0;
+}
+
+// Options of the current tool. `pixel` is the Pixel Art variant: sizes stop at 16 px, there is no
+// antialiasing (everything is whole pixels), the eraser always clears, and the pencil, brush and fill get the
+// pixel art options.
+void drawToolOptions(Toolbox& tools, bool pixel) {
     ToolSettings& s = tools.settings();
+    const int maxBrush = pixel ? ToolSettings::kMaxPixelSize : ToolSettings::kMaxSize;
+    const int maxStroke = pixel ? ToolSettings::kMaxPixelSize : ToolSettings::kMaxStrokeWidth;
 
     switch (tools.current()) {
     case ToolId::Pencil:
+        if (pixel) {
+            ImGui::Checkbox(tr(Str::OptPixelPerfect), &s.pixelPerfect);
+            ImGui::SetItemTooltip("%s", tr(Str::OptPixelPerfectTip));
+        }
         ImGui::TextDisabled("%s", tr(Str::OptPencil));
         break;
     case ToolId::Brush:
-        sizeSlider(Str::OptSize, s.brushSize, ToolSettings::kMaxSize);
-        ImGui::Checkbox(tr(Str::WordAntialias), &s.antialias);
+        sizeSlider(Str::OptSize, s.brushSize, maxBrush);
+        if (pixel)
+            tipShapeOptions(s);
+        else
+            ImGui::Checkbox(tr(Str::WordAntialias), &s.antialias);
         break;
     case ToolId::Eraser:
-        sizeSlider(Str::OptSize, s.brushSize, ToolSettings::kMaxSize);
-        ImGui::Checkbox(tr(Str::WordAntialias), &s.antialias);
-        ImGui::Checkbox(tr(Str::OptEraseToTransparent), &s.eraseToTransparent);
+        sizeSlider(Str::OptSize, s.brushSize, maxBrush);
+        if (pixel) {
+            tipShapeOptions(s);
+            hintWrapped(tr(Str::OptEraserAlways));
+        } else {
+            ImGui::Checkbox(tr(Str::WordAntialias), &s.antialias);
+            ImGui::Checkbox(tr(Str::OptEraseToTransparent), &s.eraseToTransparent);
+        }
         break;
     case ToolId::Line:
-        sizeSlider(Str::OptWidth, s.strokeWidth, ToolSettings::kMaxStrokeWidth);
-        ImGui::Checkbox(tr(Str::WordAntialias), &s.antialias);
+        sizeSlider(Str::OptWidth, s.strokeWidth, maxStroke);
+        if (!pixel)
+            ImGui::Checkbox(tr(Str::WordAntialias), &s.antialias);
         ImGui::TextDisabled("%s", tr(Str::OptShift45));
         break;
     case ToolId::Rectangle:
     case ToolId::Ellipse: {
-        sizeSlider(Str::WordOutline, s.strokeWidth, ToolSettings::kMaxStrokeWidth);
+        sizeSlider(Str::WordOutline, s.strokeWidth, maxStroke);
         int mode = static_cast<int>(s.shapeMode);
         ImGui::RadioButton(tr(Str::WordOutline), &mode, static_cast<int>(ShapeMode::Outline));
         ImGui::RadioButton(tr(Str::WordFilled), &mode, static_cast<int>(ShapeMode::Filled));
@@ -163,6 +200,14 @@ void drawToolOptions(Toolbox& tools) {
         ImGui::TextUnformatted(tr(Str::OptTolerance));
         ImGui::SetNextItemWidth(-FLT_MIN);
         ImGui::SliderInt("##tolerance", &s.fillTolerance, 0, 255, "%d", ImGuiSliderFlags_AlwaysClamp);
+        if (pixel) {
+            int global = s.fillGlobal ? 1 : 0;
+            ImGui::RadioButton(tr(Str::OptFillContiguous), &global, 0);
+            ImGui::SameLine();
+            ImGui::RadioButton(tr(Str::OptFillGlobal), &global, 1);
+            ImGui::SetItemTooltip("%s", tr(Str::OptFillGlobalTip));
+            s.fillGlobal = global != 0;
+        }
         break;
     case ToolId::Select:
         ImGui::TextDisabled("%s", tr(Str::OptSelectDrag));
@@ -269,10 +314,17 @@ void drawPalette(Toolbox& tools) {
 } // namespace
 
 void drawToolsPanel(Toolbox& tools, const Keymap& keymap) {
-    drawToolButtons(tools, keymap);
+    static constexpr std::array<ToolId, kToolCount> kAll = {ToolId::Pencil,  ToolId::Brush, ToolId::Eraser,
+                                                            ToolId::Line,    ToolId::Rectangle, ToolId::Ellipse,
+                                                            ToolId::Fill,    ToolId::Picker, ToolId::Select};
+    drawToolsPanel(tools, keymap, kAll, ToolOptions::Paint);
+}
+
+void drawToolsPanel(Toolbox& tools, const Keymap& keymap, std::span<const ToolId> toolset, ToolOptions options) {
+    drawToolButtons(tools, keymap, toolset);
 
     sectionLabel(Str::PanelOptions);
-    drawToolOptions(tools);
+    drawToolOptions(tools, options == ToolOptions::Pixel);
 
     sectionLabel(Str::PanelColors);
     drawColorSwatches(tools, keymap);

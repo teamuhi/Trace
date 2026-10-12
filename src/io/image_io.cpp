@@ -1,6 +1,7 @@
 #include "io/image_io.hpp"
 
 #include "core/i18n.hpp"
+#include "io/file_write.hpp"
 #include "io/path_utf8.hpp"
 
 #include <stb_image.h>
@@ -314,45 +315,46 @@ std::string saveImage(const fs::path& path, const Image& image, ImageFormat form
     if (image.empty() || image.width() > kMaxImageDimension || image.height() > kMaxImageDimension)
         return trf(Str::IoCannotSaveImage, {std::to_string(kMaxImageDimension)});
 
-    fs::path temp = path;
-    temp += ".trace-tmp";
+    return writeFileAtomic(path, [&](std::ostream& out) { return encode(out, image, format, options); });
+}
 
-    try {
-        {
-            std::ofstream out(temp, std::ios::binary | std::ios::trunc);
-            if (!out)
-                return trf(Str::IoCannotWriteTo, {describe(path)});
-            if (!encode(out, image, format, options)) {
-                out.close();
-                std::error_code ignored;
-                fs::remove(temp, ignored);
-                return trf(Str::IoDiskFull, {describe(path)});
-            }
-            out.close();
-            if (out.fail()) {
-                std::error_code ignored;
-                fs::remove(temp, ignored);
-                return trf(Str::IoDiskFull, {describe(path)});
-            }
-        }
-
-        std::error_code ec;
-        fs::rename(temp, path, ec); // replaces an existing file
-        if (ec) {
-            std::error_code ignored;
-            fs::remove(temp, ignored);
-            return trf(Str::IoCannotReplace, {describe(path), ec.message()});
-        }
-    } catch (const std::bad_alloc&) {
-        std::error_code ignored;
-        fs::remove(temp, ignored);
-        return trf(Str::IoMemorySave, {describe(path)});
-    } catch (const std::exception& e) {
-        std::error_code ignored;
-        fs::remove(temp, ignored);
-        return trf(Str::IoCannotSave, {describe(path), e.what()});
+std::string saveAnimatedGif(const fs::path& path, std::span<const Image> frames, std::span<const int> delaysCs,
+                            int alphaThreshold) {
+    const std::string tooBig = trf(Str::IoCannotSaveGif, {std::to_string(kMaxImageDimension)});
+    if (frames.empty() || frames.size() > kMaxGifFrames)
+        return tooBig;
+    const int w = frames.front().width();
+    const int h = frames.front().height();
+    if (w < 1 || h < 1 || w > kMaxImageDimension || h > kMaxImageDimension)
+        return tooBig;
+    for (const Image& frame : frames) {
+        if (frame.width() != w || frame.height() != h)
+            return tooBig;
     }
-    return {};
+    const int threshold = std::clamp(alphaThreshold, 0, 255);
+
+    return writeFileAtomic(path, [&](std::ostream& out) {
+        MsfGifState state = {};
+        msf_gif_alpha_threshold = threshold;
+        msf_gif_bgra_flag = 0;
+        bool ok = msf_gif_begin(&state, w, h) != 0;
+        for (std::size_t i = 0; ok && i < frames.size(); ++i) {
+            const int delay = i < delaysCs.size() ? std::clamp(delaysCs[i], kMinGifDelayCs, 65535) : kDefaultGifDelayCs;
+            // The encoder only reads the pixels; the const is cast away for its API.
+            ok = msf_gif_frame(&state, const_cast<std::uint8_t*>(reinterpret_cast<const std::uint8_t*>(frames[i].pixels().data())),
+                               delay, 16, w * 4) != 0;
+        }
+        MsfGifResult result = msf_gif_end(&state);
+        msf_gif_alpha_threshold = 0;
+        if (ok && result.data) {
+            out.write(static_cast<const char*>(result.data), static_cast<std::streamsize>(result.dataSize));
+            ok = out.good();
+        } else {
+            ok = false;
+        }
+        msf_gif_free(result);
+        return ok;
+    });
 }
 
 } // namespace trace

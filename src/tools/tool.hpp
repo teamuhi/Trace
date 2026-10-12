@@ -21,6 +21,7 @@ struct ToolSettings {
     static constexpr int kMinSize = 1;
     static constexpr int kMaxSize = 200;
     static constexpr int kMaxStrokeWidth = 50; // line, rectangle and ellipse outline
+    static constexpr int kMaxPixelSize = 16;   // brush and outline size in the pixel workspace
 
     Rgba8 primary{0, 0, 0, 255};
     Rgba8 secondary{255, 255, 255, 255};
@@ -31,6 +32,13 @@ struct ToolSettings {
     bool eraseToTransparent = false; // eraser paints transparency instead of the secondary color
     ShapeMode shapeMode = ShapeMode::Outline;
     int fillTolerance = 0; // 0..255
+
+    // Pixel art options. All off in Paint, so its tools behave as they always did.
+    bool squareBrush = false; // brush and eraser stamp a square instead of a disc
+    bool pixelPerfect = false; // pencil: a stroke loses the corner pixel of every L-shaped step
+    bool fillGlobal = false;   // fill: every matching pixel of the image, not only the connected region
+
+    bool operator==(const ToolSettings&) const = default;
 };
 
 // A pointer position in image coordinates (fractional; pixel (0, 0) covers [0, 1) x [0, 1)).

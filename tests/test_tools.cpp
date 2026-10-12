@@ -503,3 +503,231 @@ TEST_CASE("Every tool has a distinct name") {
         CHECK(seen.insert(name).second);
     }
 }
+
+// --- pixel art options ---------------------------------------------------------------------------
+// Pixel-perfect pencil, square brush and stamp, and global fill. Every one is off by default, so Paint's tools
+// are unchanged; these tests also pin that.
+
+namespace {
+
+// Moves the pencil through pixel centers one after the other, as separate drag events.
+void strokeThrough(Fixture& f, std::initializer_list<std::pair<int, int>> pixels) {
+    f.tb.select(ToolId::Pencil);
+    bool first = true;
+    std::pair<int, int> last{0, 0};
+    for (const auto& p : pixels) {
+        const PointerEvent ev = at(static_cast<float>(p.first) + 0.5f, static_cast<float>(p.second) + 0.5f);
+        if (first)
+            f.tb.press(f.doc, ev);
+        else
+            f.tb.drag(f.doc, ev);
+        first = false;
+        last = p;
+    }
+    f.tb.release(f.doc, at(static_cast<float>(last.first) + 0.5f, static_cast<float>(last.second) + 0.5f));
+}
+
+} // namespace
+
+TEST_CASE("Pixel art options are off by default") {
+    const ToolSettings s;
+    CHECK_FALSE(s.pixelPerfect);
+    CHECK_FALSE(s.squareBrush);
+    CHECK_FALSE(s.fillGlobal);
+}
+
+TEST_CASE("Without pixel-perfect the pencil keeps the corner of an L") {
+    Fixture f;
+    strokeThrough(f, {{2, 2}, {3, 2}, {3, 3}});
+    CHECK(count(f.doc.image(), kRed) == 3);
+    CHECK(f.doc.image().get(3, 2) == kRed);
+}
+
+TEST_CASE("Pixel-perfect pencil removes the corner pixel of an L") {
+    Fixture f;
+    f.tb.settings().pixelPerfect = true;
+    strokeThrough(f, {{2, 2}, {3, 2}, {3, 3}});
+    CHECK(count(f.doc.image(), kRed) == 2);
+    CHECK(f.doc.image().get(2, 2) == kRed);
+    CHECK(f.doc.image().get(3, 3) == kRed);
+    CHECK(f.doc.image().get(3, 2) == kWhite);
+}
+
+TEST_CASE("Pixel-perfect pencil turns a staircase into a clean diagonal") {
+    Fixture f;
+    f.tb.settings().pixelPerfect = true;
+    strokeThrough(f, {{0, 0}, {1, 0}, {1, 1}, {2, 1}, {2, 2}, {3, 2}, {3, 3}});
+    CHECK(count(f.doc.image(), kRed) == 4);
+    for (int i = 0; i < 4; ++i)
+        CHECK(f.doc.image().get(i, i) == kRed);
+}
+
+TEST_CASE("Pixel-perfect pencil gives back what was under a removed corner") {
+    Fixture f;
+    f.doc.image().set(3, 2, kBlue);
+    f.doc.markDirty(IRect{3, 2, 4, 3});
+    f.doc.commit();
+    f.tb.settings().pixelPerfect = true;
+    strokeThrough(f, {{2, 2}, {3, 2}, {3, 3}});
+    CHECK(f.doc.image().get(3, 2) == kBlue); // restored, not erased to white
+    CHECK(count(f.doc.image(), kRed) == 2);
+}
+
+TEST_CASE("Pixel-perfect pencil leaves straight and diagonal lines alone") {
+    Fixture f;
+    f.tb.settings().pixelPerfect = true;
+    f.drag(ToolId::Pencil, Vec2f{1.5f, 1.5f}, Vec2f{9.5f, 1.5f}); // horizontal
+    CHECK(count(f.doc.image(), kRed) == 9);
+    f.drag(ToolId::Pencil, Vec2f{1.5f, 5.5f}, Vec2f{8.5f, 12.5f}); // diagonal
+    CHECK(count(f.doc.image(), kRed) == 9 + 8);
+}
+
+TEST_CASE("Pixel-perfect pencil: one click is one pixel, and one stroke is one undo step") {
+    Fixture f;
+    f.tb.settings().pixelPerfect = true;
+    f.tb.select(ToolId::Pencil);
+    f.tb.press(f.doc, at(4.5f, 4.5f));
+    f.tb.release(f.doc, at(4.5f, 4.5f));
+    CHECK(count(f.doc.image(), kRed) == 1);
+
+    strokeThrough(f, {{8, 8}, {9, 8}, {9, 9}, {10, 9}});
+    f.doc.undo();
+    CHECK(count(f.doc.image(), kRed) == 1);
+    f.doc.undo();
+    CHECK(count(f.doc.image(), kRed) == 0);
+}
+
+TEST_CASE("Pixel-perfect pencil keeps going when the stroke leaves the image") {
+    Fixture f;
+    f.tb.settings().pixelPerfect = true;
+    strokeThrough(f, {{-3, 5}, {-2, 5}, {-1, 5}, {0, 5}, {1, 5}, {1, 6}, {1, 60}});
+    CHECK(f.doc.image().get(0, 5) == kRed);
+    CHECK(f.doc.image().get(1, 5) == kWhite); // the L corner went
+    CHECK(count(f.doc.image(), kRed) >= 2);
+}
+
+TEST_CASE("A square brush stamps an exact block, centered for odd sizes") {
+    Fixture f;
+    f.tb.settings().squareBrush = true;
+    f.tb.settings().brushSize = 3;
+    f.tb.select(ToolId::Brush);
+    f.tb.press(f.doc, at(10.5f, 10.5f));
+    f.tb.release(f.doc, at(10.5f, 10.5f));
+    CHECK(count(f.doc.image(), kRed) == 9);
+    for (int y = 9; y <= 11; ++y)
+        for (int x = 9; x <= 11; ++x)
+            CHECK(f.doc.image().get(x, y) == kRed);
+    CHECK(f.tb.cursorSquareSize() == 3);
+    CHECK(f.tb.cursorRadius() == 0.0f); // the canvas draws the square instead of a ring
+}
+
+TEST_CASE("A square brush of even size covers size x size pixels") {
+    Fixture f;
+    f.tb.settings().squareBrush = true;
+    f.tb.settings().brushSize = 4;
+    f.tb.select(ToolId::Brush);
+    f.tb.press(f.doc, at(10.5f, 10.5f));
+    f.tb.release(f.doc, at(10.5f, 10.5f));
+    CHECK(count(f.doc.image(), kRed) == 16);
+    CHECK(f.doc.image().get(8, 8) == kRed);
+    CHECK(f.doc.image().get(11, 11) == kRed);
+    CHECK(f.doc.image().get(12, 12) == kWhite);
+}
+
+TEST_CASE("A square brush stroke paints a translucent color once per pixel") {
+    Fixture f;
+    f.tb.settings().squareBrush = true;
+    f.tb.settings().brushSize = 3;
+    f.tb.settings().primary = Rgba8{0, 0, 0, 128};
+    f.tb.select(ToolId::Brush);
+    f.tb.press(f.doc, at(4.5f, 10.5f));
+    for (int x = 5; x <= 14; ++x)
+        f.tb.drag(f.doc, at(static_cast<float>(x) + 0.5f, 10.5f));
+    f.tb.release(f.doc, at(14.5f, 10.5f));
+
+    const Rgba8 expected = blendOver(kWhite, Rgba8{0, 0, 0, 128});
+    for (int x = 3; x <= 15; ++x) {
+        CHECK(f.doc.image().get(x, 9) == expected);
+        CHECK(f.doc.image().get(x, 11) == expected);
+    }
+}
+
+TEST_CASE("The square eraser clears to transparency and stays inside the image") {
+    Fixture f;
+    f.tb.settings().squareBrush = true;
+    f.tb.settings().eraseToTransparent = true;
+    f.tb.settings().brushSize = 5;
+    f.tb.select(ToolId::Eraser);
+    f.tb.press(f.doc, at(0.5f, 0.5f)); // a corner: part of the stamp is off the image
+    f.tb.release(f.doc, at(0.5f, 0.5f));
+    CHECK(f.doc.image().get(0, 0).a == 0);
+    CHECK(f.doc.image().get(2, 2).a == 0);
+    CHECK(f.doc.image().get(3, 3) == kWhite);
+}
+
+TEST_CASE("The round brush stays the default") {
+    Fixture f;
+    f.tb.settings().brushSize = 5;
+    f.tb.select(ToolId::Brush);
+    f.tb.press(f.doc, at(10.5f, 10.5f));
+    f.tb.release(f.doc, at(10.5f, 10.5f));
+    CHECK(count(f.doc.image(), kRed) == 21);
+    CHECK(f.tb.cursorSquareSize() == 0);
+}
+
+TEST_CASE("Fill is contiguous by default and global on request") {
+    const auto setup = [](Fixture& f) {
+        // A black wall splits the white image into a left and a right region.
+        for (int y = 0; y < 20; ++y)
+            f.doc.image().set(10, y, kBlack);
+        f.doc.markDirty(IRect{10, 0, 11, 20});
+        f.doc.commit();
+        f.tb.settings().primary = kBlue;
+        f.tb.select(ToolId::Fill);
+    };
+
+    Fixture contiguous;
+    setup(contiguous);
+    contiguous.tb.press(contiguous.doc, at(2.5f, 2.5f));
+    contiguous.tb.release(contiguous.doc, at(2.5f, 2.5f));
+    CHECK(count(contiguous.doc.image(), kBlue) == 10 * 20);
+    CHECK(contiguous.doc.image().get(15, 5) == kWhite);
+
+    Fixture global;
+    setup(global);
+    global.tb.settings().fillGlobal = true;
+    global.tb.press(global.doc, at(2.5f, 2.5f));
+    global.tb.release(global.doc, at(2.5f, 2.5f));
+    CHECK(count(global.doc.image(), kBlue) == 19 * 20);
+    CHECK(global.doc.image().get(15, 5) == kBlue);
+    CHECK(global.doc.image().get(10, 5) == kBlack);
+}
+
+TEST_CASE("Global fill honours the tolerance and reports its bounds") {
+    Fixture f;
+    f.doc.image().set(3, 4, Rgba8{250, 250, 250, 255});
+    f.doc.image().set(8, 8, kBlack);
+    f.doc.takeDirty();
+    f.tb.settings().fillGlobal = true;
+    f.tb.settings().fillTolerance = 10;
+    f.tb.settings().primary = kGreen;
+    f.tb.select(ToolId::Fill);
+    f.tb.press(f.doc, at(0.5f, 0.5f));
+    f.tb.release(f.doc, at(0.5f, 0.5f));
+
+    CHECK(f.doc.image().get(3, 4) == kGreen); // within the tolerance of white
+    CHECK(f.doc.image().get(8, 8) == kBlack);
+    CHECK(count(f.doc.image(), kGreen) == 399);
+    CHECK(f.doc.takeDirty() == IRect{0, 0, 20, 20});
+}
+
+TEST_CASE("ToolSettings compare equal field by field") {
+    ToolSettings a;
+    ToolSettings b;
+    CHECK(a == b);
+    b.pixelPerfect = true;
+    CHECK_FALSE(a == b);
+    b = a;
+    b.primary = kBlue;
+    CHECK_FALSE(a == b);
+}

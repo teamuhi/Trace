@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <fstream>
 #include <map>
 #include <set>
@@ -83,15 +84,114 @@ TEST_CASE("Action table matches the enum and every default parses") {
     }
 }
 
-TEST_CASE("No two default chords collide") {
+TEST_CASE("No two default chords collide where their actions can be live together") {
     const Keymap map;
-    std::set<std::string> seen;
     for (int i = 0; i < kActionCount; ++i) {
-        for (const Chord& chord : map.chords(static_cast<Action>(i))) {
-            CAPTURE(formatChord(chord));
-            CHECK(seen.insert(formatChord(chord)).second);
+        for (int j = i + 1; j < kActionCount; ++j) {
+            const Action a = static_cast<Action>(i);
+            const Action b = static_cast<Action>(j);
+            if (!contextsOverlap(actionInfo(a).context, actionInfo(b).context))
+                continue;
+            for (const Chord& chord : map.chords(a)) {
+                CAPTURE(actionInfo(a).label);
+                CAPTURE(actionInfo(b).label);
+                CAPTURE(formatChord(chord));
+                const auto others = map.chords(b);
+                CHECK(std::find(others.begin(), others.end(), chord) == others.end());
+            }
         }
     }
+}
+
+TEST_CASE("Contexts: which actions are live in which mode") {
+    // Global is live everywhere; Raster in the two bitmap modes; the others only in their own mode.
+    for (const ModeContext mode : {ModeContext::Paint, ModeContext::Pixel, ModeContext::Flow})
+        CHECK(contextActive(ActionContext::Global, mode));
+    CHECK(contextActive(ActionContext::Raster, ModeContext::Paint));
+    CHECK(contextActive(ActionContext::Raster, ModeContext::Pixel));
+    CHECK_FALSE(contextActive(ActionContext::Raster, ModeContext::Flow));
+    CHECK(contextActive(ActionContext::Paint, ModeContext::Paint));
+    CHECK_FALSE(contextActive(ActionContext::Paint, ModeContext::Pixel));
+    CHECK_FALSE(contextActive(ActionContext::Paint, ModeContext::Flow));
+    CHECK(contextActive(ActionContext::Pixel, ModeContext::Pixel));
+    CHECK_FALSE(contextActive(ActionContext::Pixel, ModeContext::Paint));
+    CHECK(contextActive(ActionContext::Flow, ModeContext::Flow));
+    CHECK_FALSE(contextActive(ActionContext::Flow, ModeContext::Paint));
+    CHECK_FALSE(contextActive(ActionContext::Flow, ModeContext::Pixel));
+}
+
+TEST_CASE("Contexts overlap when some mode has both live") {
+    const ActionContext all[] = {ActionContext::Global, ActionContext::Raster, ActionContext::Paint, ActionContext::Pixel,
+                                 ActionContext::Flow};
+    for (const ActionContext a : all) {
+        CHECK(contextsOverlap(a, a));
+        CHECK(contextsOverlap(ActionContext::Global, a));
+        CHECK(contextsOverlap(a, ActionContext::Global)); // symmetric
+    }
+    CHECK(contextsOverlap(ActionContext::Raster, ActionContext::Paint));
+    CHECK(contextsOverlap(ActionContext::Pixel, ActionContext::Raster));
+    // Disjoint pairs: the same chord may mean different things.
+    CHECK_FALSE(contextsOverlap(ActionContext::Paint, ActionContext::Pixel));
+    CHECK_FALSE(contextsOverlap(ActionContext::Paint, ActionContext::Flow));
+    CHECK_FALSE(contextsOverlap(ActionContext::Pixel, ActionContext::Flow));
+    CHECK_FALSE(contextsOverlap(ActionContext::Raster, ActionContext::Flow));
+    CHECK_FALSE(contextsOverlap(ActionContext::Flow, ActionContext::Pixel));
+}
+
+TEST_CASE("Action contexts are as designed") {
+    CHECK(actionInfo(Action::SaveFile).context == ActionContext::Global);
+    CHECK(actionInfo(Action::Export).context == ActionContext::Global);
+    CHECK(actionInfo(Action::ModeFlowchart).context == ActionContext::Global);
+    CHECK(actionInfo(Action::ResizeImage).context == ActionContext::Paint);
+    CHECK(actionInfo(Action::ToolRectangle).context == ActionContext::Raster);
+    CHECK(actionInfo(Action::Deselect).context == ActionContext::Raster); // Ctrl+D is Duplicate in a flowchart
+    CHECK(actionInfo(Action::TogglePixelGrid).context == ActionContext::Raster);
+}
+
+TEST_CASE("Global actions conflict with actions of every context") {
+    Keymap map;
+    const Chord save = chordOf("Ctrl+S"); // Save is Global
+    for (const Action other : {Action::ResizeImage /* Paint */, Action::ToolPencil /* Raster */, Action::ZoomIn /* Global */}) {
+        CAPTURE(actionInfo(other).label);
+        CHECK(map.findConflict(save, other) == Action::SaveFile);
+    }
+    // And the other way round: a Global action sees a chord held by a Paint or Raster action.
+    const Chord resize = chordOf("Ctrl+Alt+I");
+    CHECK(map.findConflict(resize, Action::SaveFile) == Action::ResizeImage);
+    const Chord pencil = chordOf("P");
+    CHECK(map.findConflict(pencil, Action::ModePaint) == Action::ToolPencil);
+    // Paint and Raster overlap, so they also conflict with each other.
+    CHECK(map.findConflict(pencil, Action::ResizeImage) == Action::ToolPencil);
+    CHECK(map.findConflict(resize, Action::ToolBrush) == Action::ResizeImage);
+}
+
+TEST_CASE("Keymap load resolves duplicate chords per context") {
+    IniFile ini;
+    ini.set("keybinds", "image.resize", "Ctrl+N");        // Paint vs Global New canvas: New canvas is earlier and keeps it
+    ini.set("keybinds", "tools.brush", "Ctrl+Alt+C");     // Raster vs Paint Canvas size: Canvas size is earlier and keeps it
+    ini.set("keybinds", "view.rulers", "Ctrl+Shift+F1");  // free: stays
+    ini.set("keybinds", "modes.paint", "Ctrl+Z");         // Global vs Global Undo: Undo is earlier and keeps it
+    ini.set("keybinds", "modes.pixel_art", "Ctrl+Alt+C"); // Global vs Paint Canvas size: the earlier one keeps it
+
+    Keymap map;
+    map.load(ini);
+    CHECK(map.chords(Action::NewCanvas) == std::vector<Chord>{chordOf("Ctrl+N")});
+    CHECK(map.chords(Action::ResizeImage).empty());
+    CHECK(map.chords(Action::CanvasSize) == std::vector<Chord>{chordOf("Ctrl+Alt+C")});
+    CHECK(map.chords(Action::ToolBrush).empty());
+    CHECK(map.chords(Action::ToggleRulers) == std::vector<Chord>{chordOf("Ctrl+Shift+F1")});
+    CHECK(map.chords(Action::Undo) == std::vector<Chord>{chordOf("Ctrl+Z")});
+    CHECK(map.chords(Action::ModePaint).empty());
+    CHECK(map.chords(Action::ModePixelArt).empty());
+}
+
+TEST_CASE("The mode and export actions have the documented defaults") {
+    const Keymap map;
+    CHECK(map.chords(Action::ModePaint) == std::vector<Chord>{chordOf("Ctrl+Shift+1")});
+    CHECK(map.chords(Action::ModeFlowchart) == std::vector<Chord>{chordOf("Ctrl+Shift+2")});
+    CHECK(map.chords(Action::ModePixelArt) == std::vector<Chord>{chordOf("Ctrl+Shift+3")});
+    CHECK(map.chords(Action::Export) == std::vector<Chord>{chordOf("Ctrl+Shift+E")});
+    CHECK(std::string(actionInfo(Action::ModePaint).group) == "Modes");
 }
 
 TEST_CASE("Keymap set, conflicts and reset") {
@@ -258,4 +358,36 @@ TEST_CASE("README keyboard shortcut table matches the default keymap") {
         CHECK(it->second == expected);
     }
     CHECK_MESSAGE(documented.size() == expectedRows, "README has a row that is not a default action");
+}
+
+// --- Pixel Art actions ---------------------------------------------------------------------------
+
+TEST_CASE("New layer is a Pixel Art action with Ctrl+Shift+N") {
+    CHECK(actionInfo(Action::NewLayer).context == ActionContext::Pixel);
+    CHECK(std::string(actionInfo(Action::NewLayer).group) == "Pixel Art");
+    const Keymap map;
+    CHECK(map.chords(Action::NewLayer) == std::vector<Chord>{chordOf("Ctrl+Shift+N")});
+    // No other action that can be live in Pixel mode uses the chord.
+    CHECK_FALSE(map.findConflict(chordOf("Ctrl+Shift+N"), Action::NewLayer).has_value());
+}
+
+TEST_CASE("A Pixel action and a Paint action may share a chord, a Raster one may not") {
+    Keymap map;
+    // Paint and Pixel never run together: Crop (Paint) and New layer (Pixel) can both use one chord.
+    CHECK_FALSE(map.findConflict(chordOf("Ctrl+Shift+X"), Action::NewLayer).has_value());
+    CHECK_FALSE(map.findConflict(chordOf("Ctrl+Shift+N"), Action::CropToSelection).has_value());
+    // A Raster action is live in Pixel mode as well, so it does conflict.
+    CHECK(map.findConflict(chordOf("P"), Action::NewLayer) == Action::ToolPencil);
+    CHECK(map.findConflict(chordOf("Ctrl+Shift+N"), Action::ToolPencil) == Action::NewLayer);
+    // Global actions conflict with everything.
+    CHECK(map.findConflict(chordOf("Ctrl+S"), Action::NewLayer) == Action::SaveFile);
+}
+
+TEST_CASE("Loading resolves a chord used by a Pixel action and a Paint action in both") {
+    IniFile ini;
+    ini.set("keybinds", "pixel.new_layer", "Ctrl+Shift+X");   // same chord as Paint's Crop to selection
+    Keymap map;
+    map.load(ini);
+    CHECK(map.chords(Action::NewLayer) == std::vector<Chord>{chordOf("Ctrl+Shift+X")});
+    CHECK(map.chords(Action::CropToSelection) == std::vector<Chord>{chordOf("Ctrl+Shift+X")});
 }

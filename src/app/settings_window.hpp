@@ -13,7 +13,7 @@ class Toolbox;
 class NativeDialogs;
 class LanguageManager;
 
-// The floating Settings window: General, Theme, View, Tools, Scripts, Keybinds and About. It edits a Settings
+// The floating Settings window: General, Theme, View, Tools, Pixel Art, Scripts, Keybinds and About. It edits a Settings
 // value in place; the App applies and saves it.
 class SettingsWindow {
 public:
@@ -38,10 +38,12 @@ private:
         Action owner; // the action that currently uses the chord
     };
 
+    bool drawCategories(Settings& settings, float footer);
     bool drawGeneral(Settings& settings);
     bool drawTheme(Settings& settings);
     bool drawView(Settings& settings);
     bool drawTools(Settings& settings, Toolbox& toolbox);
+    bool drawPixelArt(Settings& settings);
     void drawScripts();
     bool drawKeybinds(Settings& settings);
     void drawAbout(const std::string& settingsPath);

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -68,5 +69,21 @@ SaveTarget resolveSaveTarget(const std::filesystem::path& chosen, ImageFormat fa
 // file. Returns an empty string on success, otherwise a message fit to show the user; does not throw.
 std::string saveImage(const std::filesystem::path& path, const Image& image, ImageFormat format,
                       const SaveOptions& options = {});
+
+// --- animated GIF ----------------------------------------------------------------------------------
+
+inline constexpr int kMinGifDelayCs = 2;      // browsers treat shorter delays as 10 cs, so they are raised
+inline constexpr int kDefaultGifDelayCs = 10; // for a frame with no delay given
+inline constexpr std::size_t kMaxGifFrames = 4096;
+
+// Writes `frames` as one looping animated GIF; `delaysCs[i]` is how long frame i shows, in hundredths of a
+// second (clamped to at least kMinGifDelayCs; a missing entry means kDefaultGifDelayCs). Pixels with an alpha
+// below `alphaThreshold` (1-255) become transparent; 0 keeps every pixel opaque. All frames must have the same
+// non-empty size of at most kMaxImageDimension. Colors are reduced to 256 per frame. Written atomically like
+// saveImage. Returns an empty string on success, otherwise a message fit to show the user.
+//
+// The encoder keeps its transparency threshold in a global, so call this from one thread only (the main one).
+std::string saveAnimatedGif(const std::filesystem::path& path, std::span<const Image> frames,
+                            std::span<const int> delaysCs, int alphaThreshold = 128);
 
 } // namespace trace

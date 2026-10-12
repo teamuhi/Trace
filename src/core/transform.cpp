@@ -162,4 +162,50 @@ int scaledSide(int side, double factor) noexcept {
     return static_cast<int>(std::clamp(v, 1.0, static_cast<double>(kMaxImageSide)));
 }
 
+Image thumbnailOf(const Image& src, int maxSide) {
+    if (src.empty())
+        return {};
+    maxSide = std::max(maxSide, 1);
+    if (src.width() <= maxSide && src.height() <= maxSide)
+        return src;
+
+    const double scale = static_cast<double>(maxSide) / static_cast<double>(std::max(src.width(), src.height()));
+    const int width = std::max(1, static_cast<int>(std::lround(src.width() * scale)));
+    const int height = std::max(1, static_cast<int>(std::lround(src.height() * scale)));
+    Image out(width, height);
+
+    constexpr int kSamples = 3; // per axis and output pixel
+    for (int y = 0; y < height; ++y) {
+        const std::int64_t y0 = static_cast<std::int64_t>(y) * src.height() / height;
+        const std::int64_t y1 = std::max(y0 + 1, static_cast<std::int64_t>(y + 1) * src.height() / height);
+        for (int x = 0; x < width; ++x) {
+            const std::int64_t x0 = static_cast<std::int64_t>(x) * src.width() / width;
+            const std::int64_t x1 = std::max(x0 + 1, static_cast<std::int64_t>(x + 1) * src.width() / width);
+            std::uint64_t r = 0;
+            std::uint64_t g = 0;
+            std::uint64_t b = 0;
+            std::uint64_t a = 0;
+            int taken = 0;
+            for (int sy = 0; sy < kSamples; ++sy) {
+                const int py = static_cast<int>(y0 + (y1 - y0) * (2 * sy + 1) / (2 * kSamples));
+                for (int sx = 0; sx < kSamples; ++sx) {
+                    const int px = static_cast<int>(x0 + (x1 - x0) * (2 * sx + 1) / (2 * kSamples));
+                    const Rgba8 p = src.get(px, py);
+                    r += static_cast<std::uint64_t>(p.r) * p.a;
+                    g += static_cast<std::uint64_t>(p.g) * p.a;
+                    b += static_cast<std::uint64_t>(p.b) * p.a;
+                    a += p.a;
+                    ++taken;
+                }
+            }
+            if (a == 0)
+                continue; // all samples transparent
+            out.set(x, y,
+                    Rgba8{static_cast<std::uint8_t>((r + a / 2) / a), static_cast<std::uint8_t>((g + a / 2) / a),
+                          static_cast<std::uint8_t>((b + a / 2) / a), static_cast<std::uint8_t>((a + taken / 2) / taken)});
+        }
+    }
+    return out;
+}
+
 } // namespace trace

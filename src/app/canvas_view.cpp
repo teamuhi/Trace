@@ -12,6 +12,7 @@
 #include <string>
 
 #include "app/pattern_draw.hpp"
+#include "app/sampled_image.hpp"
 #include "app/theme.hpp"
 #include "core/document.hpp"
 #include "core/i18n.hpp"
@@ -23,7 +24,6 @@ namespace {
 
 constexpr float kZoomStep = 1.25f;          // menu and keyboard zoom
 constexpr float kZoomPerWheelNotch = 1.15f; // Ctrl + wheel
-constexpr float kGridMinZoom = 8.0f;        // pixel grid and hover outline appear from 800%
 constexpr float kFitMargin = 24.0f;
 constexpr float kMinRingRadius = 3.0f; // smaller rings are just a dot; the pointer itself is enough
 constexpr float kRulerThicknessEm = 1.5f;  // ruler width as a multiple of the font size
@@ -70,26 +70,30 @@ std::optional<int> toBoundary(float v) {
 
 } // namespace
 
-void CanvasView::release() noexcept {
-    if (texture_) {
-        SDL_DestroyTexture(texture_);
-        texture_ = nullptr;
+void CanvasView::zoomStep(Vec2f anchor, bool in, float factor) noexcept {
+    if (!pixelArt_) {
+        view_.zoomByFactorAt(anchor, in ? factor : 1.0f / factor);
+        return;
     }
-    textureWidth_ = 0;
-    textureHeight_ = 0;
-}
-
-void CanvasView::zoomBy(float factor) noexcept {
-    view_.zoomByFactorAt(Vec2f{viewSize_.x * 0.5f, viewSize_.y * 0.5f}, factor);
-    fitMode_ = false;
+    // Pixel art: below 100% the usual factor, from 100% up the next whole level (so 300% goes to 400%, never
+    // to 375%), and never past 100% on the way in from below.
+    const float z = view_.zoom();
+    float next;
+    if (in)
+        next = z < 1.0f ? std::min(z * factor, 1.0f) : std::floor(z + 0.001f) + 1.0f;
+    else
+        next = z > 1.0f ? std::max(std::ceil(z - 0.001f) - 1.0f, 1.0f) : z / factor;
+    view_.zoomAt(anchor, next);
 }
 
 void CanvasView::zoomIn() noexcept {
-    zoomBy(kZoomStep);
+    zoomStep(Vec2f{viewSize_.x * 0.5f, viewSize_.y * 0.5f}, true, kZoomStep);
+    fitMode_ = false;
 }
 
 void CanvasView::zoomOut() noexcept {
-    zoomBy(1.0f / kZoomStep);
+    zoomStep(Vec2f{viewSize_.x * 0.5f, viewSize_.y * 0.5f}, false, kZoomStep);
+    fitMode_ = false;
 }
 
 void CanvasView::fitToWindow() noexcept {
@@ -102,43 +106,12 @@ void CanvasView::actualSize() noexcept {
 }
 
 void CanvasView::syncTexture(Document& doc) {
-    if (!renderer_)
-        return;
-
-    const Image& img = doc.image();
+    // What is shown, not the layer being edited: for a single full-opacity layer it is the same image.
+    const Image& img = doc.displayImage();
     if (img.empty())
         return;
-
-    if (img.width() != textureWidth_ || img.height() != textureHeight_) {
-        if (texture_) {
-            SDL_DestroyTexture(texture_);
-            texture_ = nullptr;
-        }
-        textureWidth_ = img.width();
-        textureHeight_ = img.height();
-        texture_ = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC,
-                                     textureWidth_, textureHeight_);
-        if (texture_) {
-            SDL_SetTextureBlendMode(texture_, SDL_BLENDMODE_BLEND);
-            textureNearest_ = true;
-            SDL_SetTextureScaleMode(texture_, SDL_SCALEMODE_NEAREST);
-        } else {
-            SDL_Log("SDL_CreateTexture(%dx%d) failed: %s", textureWidth_, textureHeight_, SDL_GetError());
-        }
-        fitMode_ = true;
-        doc.markAllDirty();
-    }
-
-    const IRect dirty = doc.takeDirty();
-    if (dirty.empty() || !texture_)
-        return;
-
-    const SDL_Rect rect{dirty.x0, dirty.y0, dirty.width(), dirty.height()};
-    const std::size_t offset = static_cast<std::size_t>(dirty.y0) * static_cast<std::size_t>(img.width()) +
-                               static_cast<std::size_t>(dirty.x0);
-    const int pitch = img.width() * static_cast<int>(sizeof(Rgba8));
-    if (!SDL_UpdateTexture(texture_, &rect, img.pixels().data() + offset, pitch))
-        SDL_Log("SDL_UpdateTexture failed: %s", SDL_GetError());
+    if (mirror_.sync(img, doc.takeDirty()) == TextureMirror::Sync::Recreated)
+        fitMode_ = true; // a new size: show all of it
 }
 
 void CanvasView::handleViewInput(float originX, float originY, bool hovered, bool active) {
@@ -146,7 +119,10 @@ void CanvasView::handleViewInput(float originX, float originY, bool hovered, boo
     const Vec2f mouse{io.MousePos.x - originX, io.MousePos.y - originY};
 
     if (hovered && io.MouseWheel != 0.0f && io.KeyCtrl) {
-        view_.zoomByFactorAt(mouse, std::pow(kZoomPerWheelNotch, io.MouseWheel));
+        if (pixelArt_)
+            zoomStep(mouse, io.MouseWheel > 0.0f, kZoomPerWheelNotch);
+        else
+            view_.zoomByFactorAt(mouse, std::pow(kZoomPerWheelNotch, io.MouseWheel));
         fitMode_ = false;
     } else if (hovered && (io.MouseWheel != 0.0f || io.MouseWheelH != 0.0f)) {
         const float step = ImGui::GetFontSize() * 3.0f;
@@ -276,7 +252,7 @@ void CanvasView::draw(Document& doc, Toolbox& tools) {
         view_.actualSize(viewSize_, imgW, imgH);
         pendingActualSize_ = false;
     } else if (fitMode_) {
-        view_.fit(viewSize_, imgW, imgH, kFitMargin);
+        view_.fit(viewSize_, imgW, imgH, kFitMargin, pixelArt_ ? ViewTransform::kMaxZoom : 1.0f, pixelArt_);
     }
 
     const ThemeTokens& t = tokens();
@@ -321,21 +297,17 @@ void CanvasView::draw(Document& doc, Toolbox& tools) {
         drawPattern(dl, transparencyPattern_, visMin, visMax, imgMin, tile, color(t.checkerA), color(t.checkerB),
                     color(t.checkerB));
 
-        if (texture_) {
-            const bool wantNearest = view_.zoom() >= 1.0f;
-            if (wantNearest != textureNearest_) {
-                SDL_SetTextureScaleMode(texture_, wantNearest ? SDL_SCALEMODE_NEAREST : SDL_SCALEMODE_LINEAR);
-                textureNearest_ = wantNearest;
-            }
+        if (SDL_Texture* texture = mirror_.texture()) {
+            mirror_.setNearest(view_.zoom() >= 1.0f);
             // Draw only the visible slice; huge off-screen quads lose float precision at high zoom.
             const float invW = 1.0f / (imgMax.x - imgMin.x);
             const float invH = 1.0f / (imgMax.y - imgMin.y);
             const ImVec2 uv0((visMin.x - imgMin.x) * invW, (visMin.y - imgMin.y) * invH);
             const ImVec2 uv1((visMax.x - imgMin.x) * invW, (visMax.y - imgMin.y) * invH);
-            dl->AddImage((ImTextureID)(std::intptr_t)texture_, visMin, visMax, uv0, uv1);
+            addImageSampled(dl, (ImTextureID)(std::intptr_t)texture, visMin, visMax, uv0, uv1, view_.zoom() >= 1.0f);
         }
 
-        if (showPixelGrid_ && view_.zoom() >= kGridMinZoom) {
+        if (showPixelGrid_ && view_.zoom() >= gridMinZoom_) {
             const ImU32 grid = color(t.pixelGrid);
             const int gx0 = static_cast<int>(std::floor((visMin.x - imgMin.x) / s));
             const int gx1 = static_cast<int>(std::ceil((visMax.x - imgMin.x) / s));
@@ -351,7 +323,7 @@ void CanvasView::draw(Document& doc, Toolbox& tools) {
             }
         }
 
-        if (hoverValid_ && view_.zoom() >= kGridMinZoom) {
+        if (hoverValid_ && view_.zoom() >= gridMinZoom_) {
             const ImVec2 a(imgMin.x + static_cast<float>(hoverX_) * s, imgMin.y + static_cast<float>(hoverY_) * s);
             dl->AddRect(a, ImVec2(a.x + s, a.y + s), color(t.accent), 0.0f, 0, 1.5f);
         }
@@ -379,7 +351,20 @@ void CanvasView::draw(Document& doc, Toolbox& tools) {
     if ((hovered || gestureButton_ >= 0) && !hoverGuide_ && !guideDrag_.active &&
         ImGui::IsMousePosValid(&io.MousePos)) {
         const float ringRadius = tools.cursorRadius() * s;
-        if (ringRadius >= kMinRingRadius) {
+        const int squareSize = tools.cursorSquareSize();
+        if (squareSize > 0) {
+            // A square stamp: outline the pixels it covers (the stamp is centered on the pixel under the pointer).
+            const Vec2f p = view_.toImage(mouse);
+            const float left = std::floor(p.x) - static_cast<float>(squareSize / 2);
+            const float top = std::floor(p.y) - static_cast<float>(squareSize / 2);
+            const Vec2f a = view_.toView(Vec2f{left, top});
+            const Vec2f b = view_.toView(Vec2f{left + static_cast<float>(squareSize), top + static_cast<float>(squareSize)});
+            const ImVec2 min(p0.x + a.x, p0.y + a.y);
+            const ImVec2 max(p0.x + b.x, p0.y + b.y);
+            dl->AddRect(min, max, IM_COL32(0, 0, 0, 200), 0.0f, 0, 1.0f);
+            dl->AddRect(ImVec2(min.x + 1.0f, min.y + 1.0f), ImVec2(max.x - 1.0f, max.y - 1.0f), IM_COL32(255, 255, 255, 200),
+                        0.0f, 0, 1.0f);
+        } else if (ringRadius >= kMinRingRadius) {
             ImVec2 center = io.MousePos;
             if (!tools.settings().antialias) { // hard-edged brushes are centered on a pixel
                 const Vec2f p = view_.toImage(mouse);

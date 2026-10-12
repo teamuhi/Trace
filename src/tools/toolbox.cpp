@@ -1,8 +1,10 @@
 #include "tools/toolbox.hpp"
 
+#include <algorithm>
 #include <utility>
 
 #include "tools/tool_factories.hpp"
+#include "tools/tool_util.hpp"
 
 namespace trace {
 
@@ -45,9 +47,35 @@ bool Toolbox::stillValid(const Document& doc) {
     return false;
 }
 
+bool Toolbox::wouldEdit(const Document& doc, const PointerEvent& ev) const {
+    switch (current_) {
+    case ToolId::Picker:
+        return false;
+    case ToolId::Select: {
+        // Only moving selected pixels edits; a marquee does not.
+        const Vec2f p = tools::sanitize(ev.pos);
+        return doc.selection().active() && doc.selection().contains(tools::toPixel(p.x), tools::toPixel(p.y));
+    }
+    default:
+        return true;
+    }
+}
+
 void Toolbox::press(Document& doc, const PointerEvent& ev) {
     if (active_)
         return;
+    refusal_ = Refusal::None;
+    if (wouldEdit(doc, ev)) {
+        const LayerInfo& layer = doc.layer(doc.activeLayer());
+        if (!layer.visible)
+            refusal_ = Refusal::LayerHidden;
+        else if (layer.locked)
+            refusal_ = Refusal::LayerLocked;
+        if (refusal_ != Refusal::None) {
+            ++refusalCount_;
+            return; // nothing has been touched, not even a floating selection
+        }
+    }
     active_ = true;
     gestureGeneration_ = doc.generation();
     if (current_ != ToolId::Select)
@@ -82,6 +110,12 @@ void Toolbox::cancel(Document& doc) {
 
 float Toolbox::cursorRadius() const noexcept {
     return tool().cursorRadius(settings_);
+}
+
+int Toolbox::cursorSquareSize() const noexcept {
+    if (!settings_.squareBrush || (current_ != ToolId::Brush && current_ != ToolId::Eraser))
+        return 0;
+    return std::clamp(settings_.brushSize, ToolSettings::kMinSize, ToolSettings::kMaxSize);
 }
 
 const char* Toolbox::name(ToolId id) noexcept {

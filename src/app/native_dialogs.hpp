@@ -8,13 +8,31 @@ union SDL_Event;
 
 namespace trace {
 
-// Native open and save dialogs for the Settings window (a font file, a theme, a language pack). They are
-// asynchronous: SDL may report from another thread, so a result comes back as an SDL user event, which
-// the main loop hands to handleEvent(). File > Open and Save use their own path in FileSession.
+// Native open and save dialogs for everything outside File > Open / Save / Save As: the Settings window (a font
+// file, a theme, a language pack) and the exports and palettes of the modes. They are asynchronous: SDL may
+// report from another thread, so a result comes back as an SDL user event, which the main loop hands to
+// handleEvent(). File > Open and Save use their own path in FileSession.
 class NativeDialogs {
 public:
     // What the dialog was for. The filters and the default name follow from it.
-    enum class Tag { FontFile = 1, ThemeImport, ThemeExport, LanguageImport, LanguageTemplate };
+    enum class Tag {
+        FontFile = 1,
+        ThemeImport,
+        ThemeExport,
+        LanguageImport,
+        LanguageTemplate,
+        ImportImage, // pick a picture to bring into the current document
+        ExportPng,
+        ExportSvg,
+        ExportGif,
+        ExportSheet, // a sprite sheet (PNG)
+        PaletteLoad,
+        PaletteSave,
+    };
+
+    // True for the tags the Settings window opens (the App handles those itself); the others belong to the
+    // active workspace.
+    static bool isSettingsTag(Tag tag) noexcept { return tag >= Tag::FontFile && tag <= Tag::LanguageTemplate; }
 
     struct Result {
         Tag tag = Tag::FontFile;

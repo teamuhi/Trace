@@ -11,8 +11,11 @@
 #include <cstdarg>
 #include <cstdio>
 #include <filesystem>
+#include <initializer_list>
 #include <span>
+#include <string>
 #include <string_view>
+#include <vector>
 
 #include "io/path_utf8.hpp"
 
@@ -22,7 +25,9 @@
 #include "app/theme_io.hpp"
 #include "app/pattern_draw.hpp"
 #include "app/theme.hpp"
+#include "app/tool_icons.hpp"
 #include "core/action_text.hpp"
+#include "core/color_text.hpp"
 #include "core/i18n.hpp"
 #include "tools/tool_text.hpp"
 #include "tools/toolbox.hpp"
@@ -32,20 +37,23 @@ namespace trace {
 
 namespace {
 
-constexpr float kDefaultWidth = 760.0f;
-constexpr float kDefaultHeight = 480.0f;
+constexpr float kDefaultWidth = 980.0f;
+constexpr float kDefaultHeight = 660.0f;
+constexpr float kMinWidth = 640.0f;
+constexpr float kMinHeight = 440.0f;
 constexpr float kViewportFill = 0.9f; // never open larger than this share of the viewport
 
 constexpr std::array<Str, kSettingsPageCount> kPageNames = {
-    Str::SettingsPageGeneral, Str::SettingsPageTheme,    Str::SettingsPageView,  Str::SettingsPageTools,
-    Str::SettingsPageScripts, Str::SettingsPageKeybinds, Str::SettingsPageAbout};
-constexpr std::array<const char*, 5> kGroups = {"File", "Edit", "Image", "View", "Tools"};
+    Str::SettingsPageGeneral,  Str::SettingsPageTheme,    Str::SettingsPageView,  Str::SettingsPageTools,
+    Str::SettingsPagePixelArt, Str::SettingsPageScripts,  Str::SettingsPageKeybinds, Str::SettingsPageAbout};
+constexpr std::array<const char*, 7> kGroups = {"File", "Edit", "Image", "View", "Tools", "Modes", "Pixel Art"};
 constexpr std::array<int, 5> kScalePresets = {75, 100, 125, 150, 200};
 
 // Visible titles are translated; the part after ### keeps the window's and popup's identity (and so its saved
-// position) the same in every language.
+// position) the same in every language. The window grew from 760 x 480 to 980 x 660; its size is only applied
+// the first time, so the id was bumped (Settings -> Settings2) to reset a size an older imgui.ini remembers.
 std::string settingsTitle() {
-    return std::string(tr(Str::SettingsTitle)) + "###Settings";
+    return std::string(tr(Str::SettingsTitle)) + "###Settings2";
 }
 std::string restoreTitle() {
     return std::string(tr(Str::SettingsRestoreTitle)) + "###RestoreDefaults";
@@ -76,16 +84,87 @@ void toFloats(Rgba8 c, float out[4]) {
     out[3] = v.w;
 }
 
-// A color edit that keeps its float state between frames, so dragging through gray does not lose the hue
-// to 8-bit rounding. Follows `target` when something else changes it.
-bool colorEdit(const char* label, float rgba[4], Rgba8& target) {
+// The color the open picker started from, for its "Original" swatch. Only one popup is open at a time.
+ImVec4 g_pickerOriginal;
+
+// A color swatch that opens a picker popup (with hex and RGBA fields). Keeps its float state between frames,
+// so dragging through gray does not lose the hue to 8-bit rounding, and follows `target` when something else
+// changes it. `original` is what the picker's "Original" swatch restores (the built-in color); null means
+// the color the picker was opened with. Returns true while the picker edits `target`. Call inside a PushID.
+bool colorSwatch(float rgba[4], Rgba8& target, const ImVec4* original) {
     if (fromFloats(rgba) != target)
         toFloats(target, rgba);
-    if (ImGui::ColorEdit4(label, rgba, ImGuiColorEditFlags_AlphaPreviewHalf)) {
-        target = fromFloats(rgba);
-        return true;
+
+    const float height = ImGui::GetFrameHeight();
+    if (ImGui::ColorButton("##swatch", ImVec4(rgba[0], rgba[1], rgba[2], rgba[3]),
+                           ImGuiColorEditFlags_AlphaPreviewHalf | ImGuiColorEditFlags_NoTooltip,
+                           ImVec2(std::round(height * 1.6f), height))) {
+        g_pickerOriginal = toImVec4(target);
+        ImGui::OpenPopup("##picker");
     }
-    return false;
+    ImGui::SetItemTooltip("%s", tr(Str::ThemeSwatchTip));
+
+    bool edited = false;
+    if (ImGui::BeginPopup("##picker")) {
+        if (fromFloats(rgba) != target) // reset or imported while open: follow it
+            toFloats(target, rgba);
+        constexpr ImGuiColorEditFlags flags = ImGuiColorEditFlags_PickerHueBar | ImGuiColorEditFlags_AlphaBar |
+                                              ImGuiColorEditFlags_DisplayHex | ImGuiColorEditFlags_DisplayRGB |
+                                              ImGuiColorEditFlags_AlphaPreviewHalf;
+        const ImVec4& ref = original ? *original : g_pickerOriginal;
+        if (ImGui::ColorPicker4("##colorpicker", rgba, flags, &ref.x)) {
+            target = fromFloats(rgba);
+            edited = true;
+        }
+        ImGui::EndPopup();
+    }
+    return edited;
+}
+
+// Headings and hints --------------------------------------------------------------------------------------
+
+// A heading with a little air above it, so groups on a page do not run together.
+void section(Str text) {
+    ImGui::Spacing();
+    ImGui::SeparatorText(tr(text));
+}
+
+// Muted help text that wraps at the right edge, so long lines and translations never run off the page. With
+// `inlineAfterPrevious` it continues the previous widget's line when there is room (at least about eight ems),
+// else it starts a new one.
+void hint(const char* text, bool inlineAfterPrevious = false) {
+    if (inlineAfterPrevious) {
+        const float right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
+        const float room = right - ImGui::GetItemRectMax().x - ImGui::GetStyle().ItemSpacing.x;
+        if (room >= std::min(ImGui::CalcTextSize(text).x, ImGui::GetFontSize() * 8.0f))
+            ImGui::SameLine();
+    }
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextDisabled("%s", text);
+    ImGui::PopTextWrapPos();
+}
+
+// Width of a combo that shows every one of `labels` without clipping: the widest text, the frame padding and
+// the arrow button; never narrower than `minWidth`.
+float fitWidth(std::span<const char* const> labels, float minWidth = 0.0f) {
+    float widest = 0.0f;
+    for (const char* label : labels)
+        widest = std::max(widest, ImGui::CalcTextSize(label).x);
+    return std::max(minWidth, widest + ImGui::GetStyle().FramePadding.x * 2.0f + ImGui::GetFrameHeight());
+}
+
+float fitWidth(std::initializer_list<const char*> labels, float minWidth = 0.0f) {
+    return fitWidth(std::span<const char* const>(labels.begin(), labels.size()), minWidth);
+}
+
+// Width of a button that fits `label`.
+float buttonWidth(const char* label) {
+    return ImGui::CalcTextSize(label).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+}
+
+// Space left on the current line after the previous item, up to the right edge of the content area.
+float roomRight() {
+    return ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x - ImGui::GetItemRectMax().x;
 }
 
 // The label of token `index`, in the order of tokenInfos().
@@ -127,10 +206,11 @@ std::string fileUrl(std::string path) {
     return url;
 }
 
-void labeledText(const char* label, const char* fmt, ...) IM_FMTARGS(2);
-void labeledText(const char* label, const char* fmt, ...) {
+// A muted label and a value in a second column that starts `labelWidth` after the left edge.
+void labeledText(float labelWidth, const char* label, const char* fmt, ...) IM_FMTARGS(3);
+void labeledText(float labelWidth, const char* label, const char* fmt, ...) {
     ImGui::TextDisabled("%s", label);
-    ImGui::SameLine(ImGui::GetFontSize() * 9.0f);
+    ImGui::SameLine(ImGui::GetCursorPosX() + labelWidth);
     va_list args;
     va_start(args, fmt);
     ImGui::TextV(fmt, args);
@@ -181,7 +261,7 @@ bool SettingsWindow::draw(Settings& settings, Toolbox& toolbox, const std::strin
                       std::min(kDefaultHeight * uiScale(), viewport->Size.y * kViewportFill));
     ImGui::SetNextWindowSize(size, ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowPos(viewport->GetCenter(), ImGuiCond_FirstUseEver, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSizeConstraints(scaled(480.0f, 320.0f), ImVec2(FLT_MAX, FLT_MAX));
+    ImGui::SetNextWindowSizeConstraints(scaled(kMinWidth, kMinHeight), ImVec2(FLT_MAX, FLT_MAX));
     if (focusRequested_) {
         ImGui::SetNextWindowFocus();
         focusRequested_ = false;
@@ -194,25 +274,27 @@ bool SettingsWindow::draw(Settings& settings, Toolbox& toolbox, const std::strin
         if ((capture_ || conflict_) && !ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))
             endCapture();
 
+        // Roomier than the rest of the app: everything here is derived from the (already scaled) style, so the
+        // interface scale still applies. Read the style before pushing: pushes change it in place.
         const ImGuiStyle& style = ImGui::GetStyle();
+        const ImVec2 itemSpacing = style.ItemSpacing;
+        const ImVec2 framePadding = style.FramePadding;
+        const ImVec2 innerSpacing = style.ItemInnerSpacing;
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(itemSpacing.x * 1.25f, itemSpacing.y * 1.7f));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(framePadding.x * 1.25f, framePadding.y * 1.5f));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, ImVec2(innerSpacing.x * 1.5f, innerSpacing.y));
+
         const float footer = ImGui::GetFrameHeight() + style.ItemSpacing.y * 2.0f;
         settings.lastPage = std::clamp(settings.lastPage, 0, kSettingsPageCount - 1);
 
-        if (ImGui::BeginChild("##categories", ImVec2(ImGui::GetFontSize() * 9.0f, -footer),
-                              ImGuiChildFlags_Borders)) {
-            for (int i = 0; i < kSettingsPageCount; ++i) {
-                if (ImGui::Selectable(tr(kPageNames[static_cast<std::size_t>(i)]), settings.lastPage == i) &&
-                    settings.lastPage != i) {
-                    settings.lastPage = i;
-                    endCapture();
-                    changed = true;
-                }
-            }
-        }
-        ImGui::EndChild();
+        changed |= drawCategories(settings, footer);
 
         ImGui::SameLine();
-        if (ImGui::BeginChild("##page", ImVec2(0.0f, -footer), ImGuiChildFlags_Borders)) {
+        const float em = ImGui::GetFontSize();
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(std::round(em * 1.1f), std::round(em * 0.9f)));
+        const bool pageVisible = ImGui::BeginChild("##page", ImVec2(0.0f, -footer), ImGuiChildFlags_Borders);
+        ImGui::PopStyleVar(); // only the page itself; popups opened from it keep the normal padding
+        if (pageVisible) {
             switch (settings.lastPage) {
             case 0:
                 changed |= drawGeneral(settings);
@@ -227,9 +309,12 @@ bool SettingsWindow::draw(Settings& settings, Toolbox& toolbox, const std::strin
                 changed |= drawTools(settings, toolbox);
                 break;
             case 4:
-                drawScripts();
+                changed |= drawPixelArt(settings);
                 break;
             case 5:
+                drawScripts();
+                break;
+            case 6:
                 changed |= drawKeybinds(settings);
                 break;
             default:
@@ -239,9 +324,12 @@ bool SettingsWindow::draw(Settings& settings, Toolbox& toolbox, const std::strin
         }
         ImGui::EndChild();
 
+        // Restore defaults on the left, Close on the right; both fit their text.
+        const float rightEdge = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x;
         if (ImGui::Button(tr(Str::SettingsRestoreDefaults)))
             ImGui::OpenPopup(restoreTitle().c_str());
         ImGui::SameLine();
+        ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), rightEdge - buttonWidth(tr(Str::WordClose))));
         if (ImGui::Button(tr(Str::WordClose)))
             open_ = false;
 
@@ -261,6 +349,7 @@ bool SettingsWindow::draw(Settings& settings, Toolbox& toolbox, const std::strin
                 ImGui::CloseCurrentPopup();
             ImGui::EndPopup();
         }
+        ImGui::PopStyleVar(3);
     }
     ImGui::End();
 
@@ -269,14 +358,71 @@ bool SettingsWindow::draw(Settings& settings, Toolbox& toolbox, const std::strin
     return changed;
 }
 
+// The category list on the left: tall rows with an icon and a label. The selected row gets an accent bar and
+// an accent icon; the others are a little dimmer until hovered. The column is as wide as the longest label
+// needs (so translations fit), within limits.
+bool SettingsWindow::drawCategories(Settings& settings, float footer) {
+    const float em = ImGui::GetFontSize();
+    const float rowHeight = std::round(em * 2.1f);
+    const float iconSize = std::round(em * 1.15f);
+    const float pad = std::round(em * 0.8f);
+    const float gap = std::round(em * 0.6f);
+    const float bar = std::max(2.0f, std::round(3.0f * uiScale()));
+
+    float labelWidth = 0.0f;
+    for (const Str name : kPageNames)
+        labelWidth = std::max(labelWidth, ImGui::CalcTextSize(tr(name)).x);
+    const float width = std::clamp(pad + iconSize + gap + labelWidth + pad + ImGui::GetStyle().WindowPadding.x * 2.0f,
+                                   em * 9.0f, em * 16.0f);
+
+    bool changed = false;
+    if (ImGui::BeginChild("##categories", ImVec2(width, -footer), ImGuiChildFlags_Borders)) {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ThemeTokens& t = tokens();
+        for (int i = 0; i < kSettingsPageCount; ++i) {
+            const bool selected = settings.lastPage == i;
+            ImGui::PushID(i);
+            if (ImGui::Selectable("##page", selected, 0, ImVec2(0.0f, rowHeight)) && !selected) {
+                settings.lastPage = i;
+                endCapture();
+                changed = true;
+            }
+            const bool hovered = ImGui::IsItemHovered();
+            const ImVec2 min = ImGui::GetItemRectMin();
+            const ImVec2 max = ImGui::GetItemRectMax();
+            ImGui::PopID();
+
+            ImVec4 color = t.text;
+            if (!hovered && !selected)
+                color.w *= 0.75f;
+            const ImVec4 iconColor = selected ? t.accent : color;
+
+            if (selected)
+                dl->AddRectFilled(min, ImVec2(min.x + bar, max.y), ImGui::ColorConvertFloat4ToU32(t.accent));
+            drawSettingsIcon(dl, i,
+                             ImVec2(std::round(min.x + pad), std::round(min.y + (rowHeight - iconSize) * 0.5f)),
+                             iconSize, ImGui::ColorConvertFloat4ToU32(iconColor));
+
+            const float textX = std::round(min.x + pad + iconSize + gap);
+            dl->PushClipRect(ImVec2(textX, min.y), ImVec2(max.x - pad * 0.5f, max.y), true);
+            dl->AddText(ImVec2(textX, std::round(min.y + (rowHeight - ImGui::GetTextLineHeight()) * 0.5f)),
+                        ImGui::ColorConvertFloat4ToU32(color), tr(kPageNames[static_cast<std::size_t>(i)]));
+            dl->PopClipRect();
+        }
+    }
+    ImGui::EndChild();
+    return changed;
+}
+
 bool SettingsWindow::drawGeneral(Settings& s) {
     bool changed = false;
+    const float em = ImGui::GetFontSize();
     char preview[16];
     if (s.uiScalePercent == 0)
         std::snprintf(preview, sizeof(preview), "%s", tr(Str::WordAuto));
     else
         std::snprintf(preview, sizeof(preview), "%d%%", s.uiScalePercent);
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+    ImGui::SetNextItemWidth(fitWidth({tr(Str::WordAuto), "200%"}, em * 10.0f));
     if (ImGui::BeginCombo(tr(Str::GeneralInterfaceScale), preview)) {
         if (ImGui::Selectable(tr(Str::WordAuto), s.uiScalePercent == 0)) {
             s.uiScalePercent = 0;
@@ -292,10 +438,9 @@ bool SettingsWindow::drawGeneral(Settings& s) {
         }
         ImGui::EndCombo();
     }
-    ImGui::SameLine();
-    ImGui::TextDisabled("%s", tr(Str::GeneralScaleHint));
+    hint(tr(Str::GeneralScaleHint), true);
 
-    ImGui::SeparatorText(tr(Str::GeneralFont));
+    section(Str::GeneralFont);
     {
         const std::string customLabel =
             s.customFontPath.empty()
@@ -316,7 +461,8 @@ bool SettingsWindow::drawGeneral(Settings& s) {
             return "";
         };
 
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14.0f);
+        const float fontComboWidth = fitWidth({classicLabel, "Inter", "JetBrains Mono", customLabel.c_str()}, em * 14.0f);
+        ImGui::SetNextItemWidth(std::min(fontComboWidth, std::max(em * 14.0f, ImGui::GetContentRegionAvail().x * 0.55f)));
         if (ImGui::BeginCombo(tr(Str::GeneralInterfaceFont), label(static_cast<int>(s.font)))) {
             for (int i = 0; i < kFontChoiceCount; ++i) {
                 const bool isCustom = i == static_cast<int>(FontChoice::Custom);
@@ -335,14 +481,14 @@ bool SettingsWindow::drawGeneral(Settings& s) {
             dialogs_->open(NativeDialogs::Tag::FontFile);
         ImGui::EndDisabled();
 
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
+        ImGui::SetNextItemWidth(em * 12.0f);
         changed |= ImGui::SliderInt(tr(Str::GeneralFontSize), &s.fontSize, kMinFontSize, kMaxFontSize, "%d px",
                                     ImGuiSliderFlags_AlwaysClamp);
-        ImGui::TextDisabled("%s", tr(Str::GeneralFontSample));
-        ImGui::TextDisabled("%s", tr(Str::GeneralFontHint));
+        hint(tr(Str::GeneralFontSample));
+        hint(tr(Str::GeneralFontHint));
     }
 
-    ImGui::SeparatorText(tr(Str::GeneralLanguage));
+    section(Str::GeneralLanguage);
     if (languages_) {
         const auto& packs = languages_->available();
         std::string current = tr(Str::GeneralLanguageEnglish);
@@ -353,16 +499,22 @@ bool SettingsWindow::drawGeneral(Settings& s) {
                     current = pack.info.name;
             }
         }
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14.0f);
+        std::vector<std::string> labels;
+        labels.reserve(packs.size());
+        for (const auto& pack : packs)
+            labels.push_back(pack.info.name + " (" + pack.info.code + ")");
+        std::vector<const char*> widths = {tr(Str::GeneralLanguageEnglish), current.c_str()};
+        for (const std::string& label : labels)
+            widths.push_back(label.c_str());
+        ImGui::SetNextItemWidth(fitWidth(widths, em * 14.0f));
         if (ImGui::BeginCombo(tr(Str::GeneralLanguageLabel), current.c_str())) {
             if (ImGui::Selectable(tr(Str::GeneralLanguageEnglish), s.language.empty())) {
                 s.language.clear();
                 changed = true;
             }
-            for (const auto& pack : packs) {
-                const std::string label = pack.info.name + " (" + pack.info.code + ")";
-                if (ImGui::Selectable(label.c_str(), s.language == pack.info.code)) {
-                    s.language = pack.info.code;
+            for (std::size_t i = 0; i < packs.size(); ++i) {
+                if (ImGui::Selectable(labels[i].c_str(), s.language == packs[i].info.code)) {
+                    s.language = packs[i].info.code;
                     changed = true;
                 }
             }
@@ -378,28 +530,26 @@ bool SettingsWindow::drawGeneral(Settings& s) {
 
         if (const LanguagePack* active = languages_->active()) {
             if (!active->info.author.empty())
-                ImGui::TextDisabled("%s", trf(Str::GeneralLanguageAuthor, {active->info.author}).c_str());
-            ImGui::TextDisabled("%s", trf(Str::GeneralLanguageCoverage,
-                                          {std::to_string(active->translated), std::to_string(kStrCount)})
-                                          .c_str());
+                hint(trf(Str::GeneralLanguageAuthor, {active->info.author}).c_str());
+            hint(trf(Str::GeneralLanguageCoverage, {std::to_string(active->translated), std::to_string(kStrCount)}).c_str());
         }
-        ImGui::TextDisabled("%s", tr(Str::GeneralLanguageHint));
+        hint(tr(Str::GeneralLanguageHint));
     }
 
-    ImGui::SeparatorText(tr(Str::GeneralNewCanvas));
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+    section(Str::GeneralNewCanvas);
+    ImGui::SetNextItemWidth(em * 10.0f);
     changed |= ImGui::InputInt(tr(Str::WordWidthPx), &s.newWidth, 10, 100);
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+    ImGui::SetNextItemWidth(em * 10.0f);
     changed |= ImGui::InputInt(tr(Str::WordHeightPx), &s.newHeight, 10, 100);
     s.newWidth = std::clamp(s.newWidth, kMinCanvasSize, kMaxCanvasSize);
     s.newHeight = std::clamp(s.newHeight, kMinCanvasSize, kMaxCanvasSize);
-    ImGui::TextDisabled("%s", trf(Str::GeneralNewCanvasHint, {std::to_string(kMinCanvasSize), std::to_string(kMaxCanvasSize)}).c_str());
+    hint(trf(Str::GeneralNewCanvasHint, {std::to_string(kMinCanvasSize), std::to_string(kMaxCanvasSize)}).c_str());
 
-    ImGui::SeparatorText(tr(Str::GeneralUndoHistory));
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+    section(Str::GeneralUndoHistory);
+    ImGui::SetNextItemWidth(em * 10.0f);
     changed |= ImGui::InputInt(tr(Str::GeneralMemoryLimit), &s.historyLimitMb, 64, 256);
     s.historyLimitMb = std::clamp(s.historyLimitMb, kMinHistoryLimitMb, kMaxHistoryLimitMb);
-    ImGui::TextDisabled("%s", tr(Str::GeneralHistoryHint));
+    hint(tr(Str::GeneralHistoryHint));
     return changed;
 }
 
@@ -424,15 +574,107 @@ constexpr AccentPreset kAccentPresets[] = {
 
 } // namespace
 
+namespace {
+
+// The Theme page lists the tokens in these groups; every token index (the order of tokenInfos()) is in
+// exactly one of them.
+struct TokenGroup {
+    Str title;
+    std::span<const int> tokens;
+};
+
+constexpr int kInterfaceTokens[] = {0, 1, 2, 3, 4, 15}; // accent, buttons, text, window, bars, warning
+constexpr int kCanvasTokens[] = {5, 6, 7, 8, 9, 10};     // backdrop, pattern, checker A and B, border, pixel grid
+constexpr int kOverlayTokens[] = {11, 12, 13, 14};       // ruler background and text, guides, selection
+
+constexpr std::array<TokenGroup, 3> kTokenGroups = {{{Str::ThemeGroupInterface, kInterfaceTokens},
+                                                     {Str::ThemeGroupCanvas, kCanvasTokens},
+                                                     {Str::ThemeGroupOverlays, kOverlayTokens}}};
+
+constexpr bool groupsCoverEveryToken() {
+    unsigned seen = 0;
+    int count = 0;
+    for (const TokenGroup& group : kTokenGroups) {
+        for (const int index : group.tokens) {
+            seen |= 1u << index;
+            ++count;
+        }
+    }
+    return count == kTokenCount && seen == (1u << kTokenCount) - 1u;
+}
+static_assert(groupsCoverEveryToken(), "every theme token must be in exactly one group");
+
+// The live strip on the Theme page: a mock window drawn with the palette being edited. Sized from the text
+// metrics so translated labels fit their pills; everything is clipped to the strip.
+void drawThemePreview(const ThemeTokens& preview) {
+    const float unit = ImGui::GetFontSize();
+    const float lineHeight = ImGui::GetTextLineHeight();
+    const char* buttonLabel = tr(Str::ThemePreviewButton);
+    const char* selectedLabel = tr(Str::ThemePreviewSelected);
+    const char* warningLabel = tr(Str::ThemePreviewWarning);
+
+    const float pillHeight = lineHeight + unit * 0.5f;
+    const float pillPad = unit * 0.5f;
+    const float buttonPill = ImGui::CalcTextSize(buttonLabel).x + pillPad * 2.0f;
+    const float selectedPill = ImGui::CalcTextSize(selectedLabel).x + pillPad * 2.0f;
+    const float left = unit * 0.6f;
+    const float leftNeeded = left + buttonPill + unit * 0.4f + selectedPill + unit * 0.6f;
+
+    const float height = unit * 0.5f + pillHeight + unit * 0.4f + lineHeight + unit * 0.5f;
+    const ImVec2 min = ImGui::GetCursorScreenPos();
+    const ImVec2 size(ImGui::GetContentRegionAvail().x, height);
+    ImGui::Dummy(size);
+    const ImVec2 max(min.x + size.x, min.y + size.y);
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const auto col = [](const ImVec4& c) { return ImGui::ColorConvertFloat4ToU32(c); };
+    dl->PushClipRect(min, max, true);
+    dl->AddRectFilled(min, max, col(preview.windowBg), 4.0f);
+    dl->AddRect(min, max, col(preview.canvasBorder), 4.0f);
+
+    // canvas, with a guide and a selection on it; on a narrow strip it gives way to the buttons
+    const ImVec2 cMin(std::max(min.x + size.x * 0.52f, min.x + leftNeeded), min.y + unit * 0.4f);
+    const ImVec2 cMax(std::max(cMin.x, max.x - unit * 0.4f), max.y - unit * 0.4f);
+    dl->PushClipRect(cMin, cMax, true);
+    dl->AddRectFilled(cMin, cMax, col(preview.canvasBackdrop));
+    dl->AddRectFilled(ImVec2(cMin.x + unit * 0.5f, cMin.y + unit * 0.4f), ImVec2(cMax.x - unit * 0.5f, cMax.y - unit * 0.4f),
+                      col(preview.checkerA));
+    dl->AddLine(ImVec2(cMin.x + unit * 2.0f, cMin.y), ImVec2(cMin.x + unit * 2.0f, cMax.y), col(preview.guide));
+    dl->AddRect(ImVec2(cMin.x + unit * 2.6f, cMin.y + unit * 0.9f), ImVec2(cMin.x + unit * 4.4f, cMax.y - unit * 0.9f),
+                col(preview.selection));
+    dl->PopClipRect();
+
+    // a button, an accent button, text
+    const auto pill = [&](ImVec2 at, float width, const ImVec4& fill, const ImVec4& text, const char* label) {
+        const ImVec2 pillMax(at.x + width, at.y + pillHeight);
+        dl->AddRectFilled(at, pillMax, col(fill), 4.0f);
+        dl->PushClipRect(at, pillMax, true);
+        dl->AddText(ImVec2(at.x + pillPad, at.y + (pillHeight - lineHeight) * 0.5f), col(text), label);
+        dl->PopClipRect();
+    };
+    const ImVec2 b1(min.x + left, min.y + unit * 0.5f);
+    pill(b1, buttonPill, preview.button, preview.text, buttonLabel);
+    const ImVec2 b2(b1.x + buttonPill + unit * 0.4f, b1.y);
+    pill(b2, selectedPill, preview.accent, contrastText(preview.accent), selectedLabel);
+    const float textY = b1.y + pillHeight + unit * 0.4f;
+    dl->AddText(ImVec2(b1.x, textY), col(preview.warning), warningLabel);
+    dl->AddText(ImVec2(b1.x + ImGui::CalcTextSize(warningLabel).x + unit, textY), col(preview.text), tr(Str::ThemePreviewText));
+    dl->PopClipRect();
+}
+
+} // namespace
+
 bool SettingsWindow::drawTheme(Settings& s) {
     bool changed = false;
     if (!editInit_) {
         editDark_ = isDark();
         editInit_ = true;
     }
+    const float em = ImGui::GetFontSize();
+    const std::span<const TokenInfo> infos = tokenInfos();
 
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
     static constexpr Str kModeLabels[] = {Str::WordSystem, Str::WordLight, Str::WordDark};
+    ImGui::SetNextItemWidth(fitWidth({tr(kModeLabels[0]), tr(kModeLabels[1]), tr(kModeLabels[2])}, em * 10.0f));
     if (ImGui::BeginCombo(tr(Str::ThemeAppearance), tr(kModeLabels[static_cast<int>(s.theme)]))) {
         for (int i = 0; i < 3; ++i) {
             if (ImGui::Selectable(tr(kModeLabels[i]), static_cast<int>(s.theme) == i)) {
@@ -443,69 +685,67 @@ bool SettingsWindow::drawTheme(Settings& s) {
         }
         ImGui::EndCombo();
     }
-    ImGui::SameLine();
-    ImGui::TextDisabled("%s", tr(Str::ThemeSystemHint));
+    hint(tr(Str::ThemeSystemHint), true);
 
-    // Accent presets recolor both palettes at once.
-    ImGui::SeparatorText(tr(Str::ThemeAccentColor));
-    const float swatch = ImGui::GetFrameHeight() * 1.2f;
-    int index = 0;
-    for (const AccentPreset& preset : kAccentPresets) {
-        if (index++ > 0)
-            ImGui::SameLine();
-        ImGui::PushID(index);
-        if (ImGui::ColorButton("##accent", toImVec4(editDark_ ? preset.dark : preset.light),
-                               ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoAlpha, ImVec2(swatch, swatch))) {
-            const std::size_t accentIndex = 0; // "accent" is the first token
-            s.themeOverrides.dark[accentIndex] = toImVec4(preset.dark);
-            s.themeOverrides.light[accentIndex] = toImVec4(preset.light);
-            changed = true;
+    // Accent presets recolor both palettes at once. The one matching the accent being edited gets a ring.
+    section(Str::ThemeAccentColor);
+    {
+        const float swatch = std::round(ImGui::GetFrameHeight() * 1.2f);
+        const std::size_t accentIndex = 0; // "accent" is the first token
+        const Rgba8 currentAccent = fromVec4(
+            s.themeOverrides.side(editDark_)[accentIndex].value_or(baseTokens(editDark_).*(infos[accentIndex].member)));
+        int index = 0;
+        for (const AccentPreset& preset : kAccentPresets) {
+            if (index++ > 0 && roomRight() >= swatch + ImGui::GetStyle().ItemSpacing.x)
+                ImGui::SameLine();
+            ImGui::PushID(index);
+            const Rgba8 shown = editDark_ ? preset.dark : preset.light;
+            if (ImGui::ColorButton("##accent", toImVec4(shown), ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoAlpha,
+                                   ImVec2(swatch, swatch))) {
+                s.themeOverrides.dark[accentIndex] = toImVec4(preset.dark);
+                s.themeOverrides.light[accentIndex] = toImVec4(preset.light);
+                changed = true;
+            }
+            if (shown == currentAccent) {
+                const float grow = std::max(2.0f, std::round(2.0f * uiScale()));
+                const ImVec2 rMin = ImGui::GetItemRectMin();
+                const ImVec2 rMax = ImGui::GetItemRectMax();
+                ImGui::GetWindowDrawList()->AddRect(ImVec2(rMin.x - grow, rMin.y - grow), ImVec2(rMax.x + grow, rMax.y + grow),
+                                                    ImGui::GetColorU32(ImGuiCol_Text), ImGui::GetStyle().FrameRounding, 0,
+                                                    std::max(1.0f, std::round(1.5f * uiScale())));
+            }
+            ImGui::SetItemTooltip("%s", tr(preset.name));
+            ImGui::PopID();
         }
-        ImGui::SetItemTooltip("%s", tr(preset.name));
-        ImGui::PopID();
     }
 
-    ImGui::SeparatorText(tr(Str::ThemeColors));
-    ImGui::TextUnformatted(tr(Str::ThemeEditingThe));
-    ImGui::SameLine();
-    int which = editDark_ ? 1 : 0;
-    ImGui::RadioButton(tr(Str::WordDark), &which, 1);
-    ImGui::SameLine();
-    ImGui::RadioButton(tr(Str::WordLight), &which, 0);
-    editDark_ = which == 1;
+    section(Str::ThemeColors);
+    {
+        // Which palette to edit: a two-segment toggle, the active half in the selection colors.
+        const auto segment = [](Str label, bool active) {
+            if (active) {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_Header));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyleColorVec4(ImGuiCol_HeaderHovered));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImGui::GetStyleColorVec4(ImGuiCol_HeaderActive));
+            }
+            const bool clicked = ImGui::Button(tr(label));
+            if (active)
+                ImGui::PopStyleColor(3);
+            return clicked;
+        };
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(tr(Str::ThemeEditingThe));
+        ImGui::SameLine();
+        if (segment(Str::WordDark, editDark_))
+            editDark_ = true;
+        ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+        if (segment(Str::WordLight, !editDark_))
+            editDark_ = false;
+    }
 
     // A live strip drawn with the palette being edited, whichever one is applied right now.
     const ThemeTokens preview = resolveTokens(editDark_, s.themeOverrides);
-    {
-        const float height = ImGui::GetFontSize() * 3.2f;
-        const ImVec2 min = ImGui::GetCursorScreenPos();
-        const ImVec2 size(ImGui::GetContentRegionAvail().x, height);
-        ImGui::Dummy(size);
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        const auto col = [](const ImVec4& c) { return ImGui::ColorConvertFloat4ToU32(c); };
-        const float unit = ImGui::GetFontSize();
-        const ImVec2 max(min.x + size.x, min.y + size.y);
-        dl->AddRectFilled(min, max, col(preview.windowBg), 4.0f);
-        dl->AddRect(min, max, col(preview.canvasBorder), 4.0f);
-        // canvas, with a guide and a selection on it
-        const ImVec2 cMin(min.x + size.x * 0.52f, min.y + unit * 0.4f);
-        const ImVec2 cMax(max.x - unit * 0.4f, max.y - unit * 0.4f);
-        dl->AddRectFilled(cMin, cMax, col(preview.canvasBackdrop));
-        dl->AddRectFilled(ImVec2(cMin.x + unit * 0.5f, cMin.y + unit * 0.4f), ImVec2(cMax.x - unit * 0.5f, cMax.y - unit * 0.4f),
-                          col(preview.checkerA));
-        dl->AddLine(ImVec2(cMin.x + unit * 2.0f, cMin.y), ImVec2(cMin.x + unit * 2.0f, cMax.y), col(preview.guide));
-        dl->AddRect(ImVec2(cMin.x + unit * 2.6f, cMin.y + unit * 0.9f), ImVec2(cMin.x + unit * 4.4f, cMax.y - unit * 0.9f),
-                    col(preview.selection));
-        // a button, an accent button, text
-        const ImVec2 b1(min.x + unit * 0.6f, min.y + unit * 0.5f);
-        dl->AddRectFilled(b1, ImVec2(b1.x + unit * 3.4f, b1.y + unit * 1.3f), col(preview.button), 4.0f);
-        dl->AddText(ImVec2(b1.x + unit * 0.5f, b1.y + unit * 0.2f), col(preview.text), tr(Str::ThemePreviewButton));
-        const ImVec2 b2(b1.x + unit * 3.8f, b1.y);
-        dl->AddRectFilled(b2, ImVec2(b2.x + unit * 3.4f, b2.y + unit * 1.3f), col(preview.accent), 4.0f);
-        dl->AddText(ImVec2(b2.x + unit * 0.5f, b2.y + unit * 0.2f), col(contrastText(preview.accent)), tr(Str::ThemePreviewSelected));
-        dl->AddText(ImVec2(b1.x, b1.y + unit * 1.6f), col(preview.warning), tr(Str::ThemePreviewWarning));
-        dl->AddText(ImVec2(b1.x + unit * 4.2f, b1.y + unit * 1.6f), col(preview.text), tr(Str::ThemePreviewText));
-    }
+    drawThemePreview(preview);
 
     ImGui::Spacing();
     ImGui::BeginDisabled(dialogs_ == nullptr || dialogs_->busy());
@@ -517,26 +757,64 @@ bool SettingsWindow::drawTheme(Settings& s) {
     ImGui::EndDisabled();
     ImGui::SetItemTooltip("%s", tr(Str::ThemeExportTip));
 
-    ImGui::Spacing();
-    const std::span<const TokenInfo> infos = tokenInfos();
     auto& overrides = s.themeOverrides.side(editDark_);
     const ThemeTokens& base = baseTokens(editDark_);
-    for (std::size_t i = 0; i < infos.size(); ++i) {
-        ImGui::PushID(static_cast<int>(i));
-        const ImVec4 builtIn = base.*(infos[i].member);
-        Rgba8 current = fromVec4(overrides[i].value_or(builtIn));
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
-        if (colorEdit(tr(tokenString(i)), themeRows_[i], current)) {
-            overrides[i] = toImVec4(current);
-            changed = true;
+    const float swatchColumn = std::round(ImGui::GetFrameHeight() * 1.6f);
+    const float hexColumn = std::max(ImGui::CalcTextSize("#DDDDDDDD").x, ImGui::CalcTextSize("#00000000").x);
+    const float resetColumn = buttonWidth(tr(Str::WordReset));
+    for (std::size_t g = 0; g < kTokenGroups.size(); ++g) {
+        const TokenGroup& group = kTokenGroups[g];
+        section(group.title);
+        ImGui::PushID(static_cast<int>(g));
+        constexpr ImGuiTableFlags tableFlags =
+            ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_NoSavedSettings;
+        if (ImGui::BeginTable("##tokens", 4, tableFlags)) {
+            ImGui::TableSetupColumn("##swatch", ImGuiTableColumnFlags_WidthFixed, swatchColumn);
+            ImGui::TableSetupColumn("##name", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("##hex", ImGuiTableColumnFlags_WidthFixed, hexColumn);
+            ImGui::TableSetupColumn("##reset", ImGuiTableColumnFlags_WidthFixed, resetColumn);
+            for (const int token : group.tokens) {
+                const std::size_t i = static_cast<std::size_t>(token);
+                const ImVec4 builtIn = base.*(infos[i].member);
+                Rgba8 current = fromVec4(overrides[i].value_or(builtIn));
+
+                ImGui::PushID(token);
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                if (colorSwatch(themeRows_[i], current, &builtIn)) {
+                    overrides[i] = toImVec4(current);
+                    changed = true;
+                }
+
+                ImGui::TableSetColumnIndex(1);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted(tr(tokenString(i)));
+                if (overrides[i]) { // a dot in the accent color marks a color changed from the built-in one
+                    ImGui::SameLine();
+                    ImGui::PushStyleColor(ImGuiCol_Text, tokens().accent);
+                    ImGui::Bullet();
+                    ImGui::PopStyleColor();
+                    ImGui::SetItemTooltip("%s", tr(Str::ThemeColorChanged));
+                }
+
+                ImGui::TableSetColumnIndex(2);
+                ImGui::AlignTextToFramePadding();
+                const std::string hex = formatColor(current);
+                ImGui::TextDisabled("%s", current.a == 255 ? hex.substr(0, 7).c_str() : hex.c_str());
+
+                ImGui::TableSetColumnIndex(3);
+                if (overrides[i]) {
+                    if (ImGui::SmallButton(tr(Str::WordReset))) {
+                        overrides[i].reset();
+                        changed = true;
+                    }
+                } else {
+                    ImGui::Dummy(ImVec2(resetColumn, 1.0f)); // keeps the columns from jumping
+                }
+                ImGui::PopID();
+            }
+            ImGui::EndTable();
         }
-        ImGui::SameLine();
-        ImGui::BeginDisabled(!overrides[i]);
-        if (ImGui::SmallButton(tr(Str::WordReset))) {
-            overrides[i].reset();
-            changed = true;
-        }
-        ImGui::EndDisabled();
         ImGui::PopID();
     }
 
@@ -580,7 +858,10 @@ bool patternCombo(Str labelText, PatternStyle& style, bool transparency, const S
                 std::max(6.0f, static_cast<float>(s.patternSpacing) * 0.5f), base, marks, marks);
     ImGui::GetWindowDrawList()->AddRect(min, ImVec2(min.x + swatch, min.y + swatch), col(t.canvasBorder));
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
+    std::array<const char*, kPatternStyleCount> labels{};
+    for (int i = 0; i < kPatternStyleCount; ++i)
+        labels[static_cast<std::size_t>(i)] = tr(kPatternLabels[i]);
+    ImGui::SetNextItemWidth(fitWidth(labels, ImGui::GetFontSize() * 12.0f));
     if (ImGui::BeginCombo(tr(labelText), tr(kPatternLabels[static_cast<int>(style)]))) {
         for (int i = 0; i < kPatternStyleCount; ++i) {
             if (ImGui::Selectable(tr(kPatternLabels[i]), static_cast<int>(style) == i)) {
@@ -610,14 +891,14 @@ bool SettingsWindow::drawView(Settings& s) {
     changed |= ImGui::Checkbox(tr(Str::ViewSysStats), &s.showSysStats);
     ImGui::EndDisabled();
 
-    ImGui::SeparatorText(tr(Str::ViewBackgrounds));
+    section(Str::ViewBackgrounds);
     changed |= patternCombo(Str::ViewBehindImage, s.backdropPattern, false, s);
     changed |= patternCombo(Str::ViewBehindTransparent, s.transparencyPattern, true, s);
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
     changed |= ImGui::SliderInt(tr(Str::ViewPatternSpacing), &s.patternSpacing, kMinPatternSpacing, kMaxPatternSpacing, "%d px",
                                 ImGuiSliderFlags_AlwaysClamp);
 
-    ImGui::SeparatorText(tr(Str::ViewNewCanvasOpensAt));
+    section(Str::ViewNewCanvasOpensAt);
     int zoom = static_cast<int>(s.newDocZoom);
     changed |= ImGui::RadioButton(tr(Str::ViewFitToWindow), &zoom, static_cast<int>(Settings::NewDocZoom::Fit));
     changed |= ImGui::RadioButton("100%", &zoom, static_cast<int>(Settings::NewDocZoom::ActualSize));
@@ -628,9 +909,12 @@ bool SettingsWindow::drawView(Settings& s) {
 bool SettingsWindow::drawTools(Settings& s, Toolbox& toolbox) {
     bool changed = false;
     changed |= ImGui::Checkbox(tr(Str::ToolsRestoreLast), &s.restoreLastToolSettings);
-    ImGui::TextDisabled("%s", tr(Str::ToolsRestoreHint));
+    hint(tr(Str::ToolsRestoreHint));
 
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+    std::array<const char*, kToolCount> toolLabels{};
+    for (int i = 0; i < kToolCount; ++i)
+        toolLabels[static_cast<std::size_t>(i)] = tr(toolString(static_cast<ToolId>(i)));
+    ImGui::SetNextItemWidth(fitWidth(toolLabels, ImGui::GetFontSize() * 10.0f));
     if (ImGui::BeginCombo(tr(Str::ToolsStartTool), tr(toolString(s.startTool)))) {
         for (int i = 0; i < kToolCount; ++i) {
             const ToolId id = static_cast<ToolId>(i);
@@ -642,7 +926,7 @@ bool SettingsWindow::drawTools(Settings& s, Toolbox& toolbox) {
         ImGui::EndCombo();
     }
 
-    ImGui::SeparatorText(tr(Str::ToolsStartingValues));
+    section(Str::ToolsStartingValues);
     ImGui::BeginDisabled(s.restoreLastToolSettings);
     ToolSettings& t = s.toolDefaults;
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
@@ -654,9 +938,10 @@ bool SettingsWindow::drawTools(Settings& s, Toolbox& toolbox) {
     changed |= ImGui::Checkbox(tr(Str::WordAntialias), &t.antialias);
     changed |= ImGui::Checkbox(tr(Str::ToolsEraserTransparent), &t.eraseToTransparent);
 
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
     int mode = static_cast<int>(t.shapeMode);
     static constexpr Str kShapeLabels[] = {Str::WordOutline, Str::WordFilled, Str::WordOutlineAndFill};
+    ImGui::SetNextItemWidth(
+        fitWidth({tr(kShapeLabels[0]), tr(kShapeLabels[1]), tr(kShapeLabels[2])}, ImGui::GetFontSize() * 10.0f));
     if (ImGui::BeginCombo(tr(Str::ToolsShapeMode), tr(kShapeLabels[mode]))) {
         for (int i = 0; i < 3; ++i) {
             if (ImGui::Selectable(tr(kShapeLabels[i]), mode == i)) {
@@ -669,8 +954,17 @@ bool SettingsWindow::drawTools(Settings& s, Toolbox& toolbox) {
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
     changed |= ImGui::SliderInt(tr(Str::ToolsFillTolerance), &t.fillTolerance, 0, 255, "%d", ImGuiSliderFlags_AlwaysClamp);
 
-    changed |= colorEdit(tr(Str::WordPrimaryColor), primary_, t.primary);
-    changed |= colorEdit(tr(Str::WordSecondaryColor), secondary_, t.secondary);
+    const auto colorRow = [&](Str name, float rgba[4], Rgba8& target) {
+        ImGui::PushID(stringKey(name));
+        const bool edited = colorSwatch(rgba, target, nullptr);
+        ImGui::SameLine();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(tr(name));
+        ImGui::PopID();
+        return edited;
+    };
+    changed |= colorRow(Str::WordPrimaryColor, primary_, t.primary);
+    changed |= colorRow(Str::WordSecondaryColor, secondary_, t.secondary);
 
     if (ImGui::Button(tr(Str::ToolsUseCurrent))) {
         t = toolbox.settings();
@@ -682,6 +976,29 @@ bool SettingsWindow::drawTools(Settings& s, Toolbox& toolbox) {
         toolbox.settings() = t;
     ImGui::SetItemTooltip("%s", tr(Str::ToolsApplyNowTip));
     ImGui::EndDisabled();
+    return changed;
+}
+
+bool SettingsWindow::drawPixelArt(Settings& s) {
+    bool changed = false;
+    PixelSettings& px = s.pixel;
+
+    section(Str::GeneralNewCanvas);
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
+    changed |= ImGui::SliderInt(tr(Str::WordWidthPx), &px.newWidth, 1, kMaxPixelCanvasSide, "%d px", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
+    changed |= ImGui::SliderInt(tr(Str::WordHeightPx), &px.newHeight, 1, kMaxPixelCanvasSide, "%d px", ImGuiSliderFlags_AlwaysClamp);
+    hint(trf(Str::GeneralNewCanvasHint, {"1", std::to_string(kMaxPixelCanvasSide)}).c_str());
+
+    section(Str::PixelSectionGrid);
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
+    changed |= ImGui::SliderInt(tr(Str::PixelGridFrom), &px.gridZoomPercent, kMinPixelGridZoomPercent,
+                                kMaxPixelGridZoomPercent, "%d%%", ImGuiSliderFlags_AlwaysClamp);
+    hint(tr(Str::PixelGridHint));
+
+    section(Str::PixelSectionDrawing);
+    changed |= ImGui::Checkbox(tr(Str::PixelPerfectDefault), &px.pixelPerfectDefault);
+    hint(tr(Str::PixelPerfectHint));
     return changed;
 }
 
@@ -793,7 +1110,8 @@ bool SettingsWindow::drawKeybinds(Settings& s) {
     Keymap& keymap = s.keymap;
     bool changed = pollKeyCapture(keymap); // before any button, so the click that starts a capture is not read
 
-    ImGui::SetNextItemWidth(std::max(ImGui::GetContentRegionAvail().x - ImGui::GetFontSize() * 9.0f,
+    const float resetAllWidth = buttonWidth(tr(Str::KeysResetAll));
+    ImGui::SetNextItemWidth(std::max(ImGui::GetContentRegionAvail().x - resetAllWidth - ImGui::GetStyle().ItemSpacing.x,
                                      ImGui::GetFontSize() * 6.0f));
     ImGui::InputTextWithHint("##filter", tr(Str::KeysFilter), filter_, sizeof(filter_));
     ImGui::SameLine();
@@ -823,7 +1141,7 @@ bool SettingsWindow::drawKeybinds(Settings& s) {
         ImGui::TableSetupColumn(tr(Str::KeysColumnAction), ImGuiTableColumnFlags_WidthStretch, 1.2f);
         ImGui::TableSetupColumn(tr(Str::KeysColumnShortcut), ImGuiTableColumnFlags_WidthStretch, 1.5f);
         ImGui::TableSetupColumn(tr(Str::KeysColumnAlternate), ImGuiTableColumnFlags_WidthStretch, 1.5f);
-        ImGui::TableSetupColumn(tr(Str::WordReset), ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 4.5f);
+        ImGui::TableSetupColumn(tr(Str::WordReset), ImGuiTableColumnFlags_WidthFixed, buttonWidth(tr(Str::WordReset)));
         ImGui::TableHeadersRow();
 
         bool any = false;
@@ -865,15 +1183,15 @@ bool SettingsWindow::drawKeybinds(Settings& s) {
         }
         ImGui::EndTable();
         if (!any)
-            ImGui::TextDisabled("%s", tr(Str::KeysNoMatch));
+            hint(tr(Str::KeysNoMatch));
     }
-    ImGui::TextDisabled("%s", tr(Str::KeysHelp));
+    hint(tr(Str::KeysHelp));
     return changed;
 }
 
 void SettingsWindow::drawAbout(const std::string& settingsPath) {
     ImGui::TextUnformatted("Trace");
-    ImGui::TextDisabled("%s", tr(Str::AboutTagline));
+    hint(tr(Str::AboutTagline));
     ImGui::Spacing();
 
 #ifdef NDEBUG
@@ -882,15 +1200,21 @@ void SettingsWindow::drawAbout(const std::string& settingsPath) {
     constexpr const char* build = "Debug";
 #endif
     const int sdl = SDL_GetVersion();
-    labeledText(tr(Str::AboutVersion), "%s", TRACE_VERSION);
-    labeledText(tr(Str::AboutBuild), "%s", build);
-    labeledText(tr(Str::AboutPlatform), "%s", SDL_GetPlatform());
-    labeledText("SDL", "%d.%d.%d", SDL_VERSIONNUM_MAJOR(sdl), SDL_VERSIONNUM_MINOR(sdl),
+    // The label column is as wide as the longest label (in the current language) plus an em.
+    float labelWidth = 0.0f;
+    for (const char* label : {tr(Str::AboutVersion), tr(Str::AboutBuild), tr(Str::AboutPlatform), "SDL", "Dear ImGui",
+                              tr(Str::AboutLicense)})
+        labelWidth = std::max(labelWidth, ImGui::CalcTextSize(label).x);
+    labelWidth += ImGui::GetFontSize();
+    labeledText(labelWidth, tr(Str::AboutVersion), "%s", TRACE_VERSION);
+    labeledText(labelWidth, tr(Str::AboutBuild), "%s", build);
+    labeledText(labelWidth, tr(Str::AboutPlatform), "%s", SDL_GetPlatform());
+    labeledText(labelWidth, "SDL", "%d.%d.%d", SDL_VERSIONNUM_MAJOR(sdl), SDL_VERSIONNUM_MINOR(sdl),
                 SDL_VERSIONNUM_MICRO(sdl));
-    labeledText("Dear ImGui", "%s", IMGUI_VERSION);
-    labeledText(tr(Str::AboutLicense), "MIT");
+    labeledText(labelWidth, "Dear ImGui", "%s", IMGUI_VERSION);
+    labeledText(labelWidth, tr(Str::AboutLicense), "MIT");
 
-    ImGui::SeparatorText(tr(Str::AboutSettingsFile));
+    section(Str::AboutSettingsFile);
     if (settingsPath.empty()) {
         ImGui::TextWrapped("%s", tr(Str::AboutNoDataDir));
         return;

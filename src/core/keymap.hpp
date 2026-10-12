@@ -19,6 +19,7 @@ enum class Action {
     OpenFile,
     SaveFile,
     SaveFileAs,
+    Export,
     OpenSettings,
     // Edit
     Undo,
@@ -55,16 +56,37 @@ enum class Action {
     SwapColors,
     DecreaseSize,
     IncreaseSize,
+    // Modes
+    ModePaint,
+    ModeFlowchart,
+    ModePixelArt,
+    // Pixel Art
+    NewLayer,
     Count
 };
 inline constexpr int kActionCount = static_cast<int>(Action::Count);
 inline constexpr int kChordSlots = 2;
 
+// Where an action is live. The app polls only the actions of Global plus the active mode, so the same chord
+// can mean different things in different modes (R is Rectangle when painting and a flowchart shape later).
+// Raster covers the two bitmap modes, Paint and Pixel; Global covers every mode.
+enum class ActionContext { Global, Raster, Paint, Pixel, Flow };
+
+// The mode an action context is evaluated against: exactly one of these is active at a time.
+enum class ModeContext { Paint, Pixel, Flow };
+
+// Whether an action of context `ctx` is live while `mode` is active.
+bool contextActive(ActionContext ctx, ModeContext mode) noexcept;
+
+// Whether two contexts can be live at the same time, so a chord bound in both would fire twice.
+bool contextsOverlap(ActionContext a, ActionContext b) noexcept;
+
 struct ActionInfo {
     Action id;
     const char* configKey;             // key inside the [keybinds] section of settings.ini
     const char* label;                 // shown on the Keybinds page and in the README table
-    const char* group;                 // File, Edit, Image, View or Tools
+    const char* group;                 // File, Edit, Image, View, Tools, Modes or Pixel Art
+    ActionContext context;             // where the action is live
     const char* defaults[kChordSlots]; // chord strings, nullptr for an empty slot
 };
 
@@ -108,14 +130,16 @@ public:
     // already holds `chord`.
     bool set(Action action, int slot, std::optional<Chord> chord);
 
-    // The first action other than `ignore` that uses `chord` in any slot.
+    // The first action other than `ignore` that uses `chord` in any slot and whose context overlaps the
+    // context of `ignore`. Actions that can never be live together do not conflict.
     std::optional<Action> findConflict(const Chord& chord, Action ignore) const;
 
     bool isDefault(Action action) const;
 
     // Reads only [keybinds]: `configKey = chordA | chordB`. A missing key means the default, an empty value
     // means unbound, and an unparsable value falls back to the default for that action. A chord already
-    // used by an earlier action is dropped so no chord ever triggers two actions.
+    // used by an earlier action with an overlapping context is dropped so no chord ever triggers two
+    // actions at once.
     void load(const IniFile& ini);
 
     // Writes only the actions that differ from their defaults.

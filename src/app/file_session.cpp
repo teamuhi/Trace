@@ -15,7 +15,6 @@
 
 #include "app/settings.hpp"
 #include "app/theme.hpp"
-#include "core/document.hpp"
 #include "core/i18n.hpp"
 #include "io/path_utf8.hpp"
 
@@ -45,25 +44,25 @@ struct FilterSet {
     }
 };
 
-const FilterSet& openFilters() {
+// The adapter's open types, then a catch-all.
+const FilterSet& openFilters(const FileAdapter& adapter) {
     static FilterSet set;
     set = FilterSet{};
-    set.names.reserve(2);
-    set.add(tr(Str::FilterImages), "png;jpg;jpeg;bmp;tga;gif");
+    set.names.reserve(adapter.openFilters().size() + 1);
+    for (const FileFilter& filter : adapter.openFilters())
+        set.add(tr(filter.name), filter.patterns);
     set.add(tr(Str::FilterAllFiles), "*");
     set.seal();
     return set;
 }
 
-// One filter per entry of kAllFormats, in the same order, so the filter index SDL reports maps straight back.
-const FilterSet& saveFilters() {
+// One filter per format of the adapter, in the same order, so the filter index SDL reports maps straight back.
+const FilterSet& saveFilters(const FileAdapter& adapter) {
     static FilterSet set;
     set = FilterSet{};
-    set.add(tr(Str::FilterPng), "png");
-    set.add(tr(Str::FilterJpeg), "jpg;jpeg");
-    set.add(tr(Str::FilterBmp), "bmp");
-    set.add(tr(Str::FilterTga), "tga");
-    set.add(tr(Str::FilterGif), "gif");
+    set.names.reserve(adapter.saveFormats().size());
+    for (const FileFormat& format : adapter.saveFormats())
+        set.add(tr(format.name), format.patterns);
     set.seal();
     return set;
 }
@@ -92,14 +91,22 @@ struct FileSession::DialogResult {
     std::string error;
 };
 
-FileSession::FileSession(Document& document, Settings& settings, Hooks hooks)
-    : document_(document), settings_(settings), hooks_(std::move(hooks)) {}
+FileSession::FileSession(FileAdapter& adapter, Settings& settings, Hooks hooks)
+    : adapter_(adapter), settings_(settings), hooks_(std::move(hooks)) {}
 
 bool FileSession::init(SDL_Window* window) {
     window_ = window;
-    g_dialogEvent = SDL_RegisterEvents(1);
+    // Every session shares one event type: the dialog callback has no `this`, and only the session that opened
+    // a dialog can be waiting for its result (switching workspaces is refused while a dialog is open).
+    if (g_dialogEvent == 0)
+        g_dialogEvent = SDL_RegisterEvents(1);
     dialogEvent_ = g_dialogEvent;
     return dialogEvent_ != 0;
+}
+
+bool FileSession::hasUnsavedChanges() {
+    adapter_.commitPending();
+    return adapter_.isModified();
 }
 
 // --- requests ----------------------------------------------------------------------------------
@@ -109,7 +116,7 @@ void FileSession::newDocumentNow() {
 }
 
 void FileSession::requestNew() {
-    if (!busy())
+    if (!busy() && hasDocument())
         guard({Followup::Kind::New, {}});
 }
 
@@ -119,17 +126,20 @@ void FileSession::requestOpen() {
 }
 
 void FileSession::requestOpenPath(const fs::path& path) {
-    if (!busy())
-        guard({Followup::Kind::OpenPath, path});
+    if (busy())
+        return;
+    if (hooks_.routeOpen && hooks_.routeOpen(path))
+        return; // another workspace takes it
+    guard({Followup::Kind::OpenPath, path});
 }
 
 void FileSession::requestSave() {
-    if (!busy())
+    if (!busy() && hasDocument())
         saveThen({});
 }
 
 void FileSession::requestSaveAs() {
-    if (busy())
+    if (busy() || !hasDocument())
         return;
     afterSave_ = {};
     showSaveDialog();
@@ -159,8 +169,8 @@ void FileSession::run(const Followup& followup) {
 }
 
 void FileSession::guard(Followup followup) {
-    document_.commit(); // so that "modified" reflects everything the user has drawn
-    if (!document_.isModified()) {
+    // Pending edits are committed first, so that "modified" reflects everything the user has drawn.
+    if (!hasUnsavedChanges()) {
         run(followup);
         return;
     }
@@ -179,11 +189,9 @@ void FileSession::saveThen(Followup followup) {
 }
 
 void FileSession::doNew() {
-    try {
-        document_.reset(settings_.newWidth, settings_.newHeight);
-    } catch (const std::exception& e) {
-        SDL_Log("Cannot create a %d x %d canvas: %s", settings_.newWidth, settings_.newHeight, e.what());
-        showMessage(trf(Str::ErrNewMemory, {std::to_string(settings_.newWidth), std::to_string(settings_.newHeight)}), true);
+    const std::string error = adapter_.newBlank();
+    if (!error.empty()) {
+        showMessage(error, true);
         return; // the old document is untouched
     }
     path_.clear();
@@ -194,37 +202,28 @@ void FileSession::doNew() {
 }
 
 void FileSession::doOpen(const fs::path& path) {
-    LoadResult result = loadImage(path);
-    if (!result.image) {
-        showMessage(result.error, true);
-        return;
-    }
-    try {
-        document_.load(std::move(*result.image));
-    } catch (const std::exception& e) {
-        SDL_Log("Cannot open %s: %s", utf8FromPath(path).c_str(), e.what());
-        showMessage(trf(Str::ErrOpenMemory, {utf8FromPath(path.filename())}), true);
+    FileAdapter::LoadOutcome outcome = adapter_.load(path);
+    if (!outcome.error.empty()) {
+        showMessage(std::move(outcome.error), true);
         return;
     }
 
     path_ = path;
-    format_ = formatFromPath(path);
-    // Saving would write a still image over the original animation, so insist on a new name.
-    lockInPlace_ = result.frameCount > 1;
+    format_ = adapter_.formatForPath(path);
+    lockInPlace_ = outcome.lockInPlace;
     rememberDirectory(path);
     if (hooks_.documentReplaced)
         hooks_.documentReplaced(false);
 
-    if (result.frameCount > 1) {
-        showMessage(trf(Str::FileGifFrames, {std::to_string(result.frameCount)}), false);
-    }
+    if (!outcome.notice.empty())
+        showMessage(std::move(outcome.notice), false);
 }
 
-bool FileSession::writeFile(const fs::path& path, ImageFormat format, int quality) {
-    document_.commit();
+bool FileSession::writeFile(const fs::path& path, int format, int quality) {
+    adapter_.commitPending();
     SaveOptions options;
     options.jpegQuality = std::clamp(quality, 1, 100);
-    const std::string error = saveImage(path, document_.image(), format, options);
+    const std::string error = adapter_.save(path, format, options);
     if (!error.empty()) {
         afterSave_ = {};
         showMessage(error, true);
@@ -233,17 +232,32 @@ bool FileSession::writeFile(const fs::path& path, ImageFormat format, int qualit
     path_ = path;
     format_ = format;
     lockInPlace_ = false;
-    document_.markSaved();
+    adapter_.markSaved();
     rememberDirectory(path);
     if (hooks_.saved)
         hooks_.saved(utf8FromPath(path.filename()));
     return true;
 }
 
+// A recognised extension on `chosen` decides the format. Otherwise `fallbackFormat` (the file type selected in
+// the save dialog) is used and its extension is appended, so the result always names a format.
+FileSession::Target FileSession::resolveTarget(const fs::path& chosen, int fallbackFormat) const {
+    if (const std::optional<int> format = adapter_.formatForPath(chosen))
+        return Target{chosen, *format, false};
+
+    fs::path path = chosen;
+    const auto formats = adapter_.saveFormats();
+    path += std::string(".") + formats[static_cast<std::size_t>(fallbackFormat)].extension;
+    return Target{std::move(path), fallbackFormat, true};
+}
+
 void FileSession::onSavePicked(const fs::path& chosen, int filterIndex) {
-    const bool known = filterIndex >= 0 && static_cast<std::size_t>(filterIndex) < kAllFormats.size();
-    const ImageFormat fallback = known ? kAllFormats[static_cast<std::size_t>(filterIndex)] : ImageFormat::Png;
-    const SaveTarget target = resolveSaveTarget(chosen, fallback);
+    if (adapter_.saveFormats().empty()) {
+        afterSave_ = {};
+        return;
+    }
+    const bool known = filterIndex >= 0 && static_cast<std::size_t>(filterIndex) < adapter_.saveFormats().size();
+    const Target target = resolveTarget(chosen, known ? filterIndex : 0);
 
     // The native dialog already asked about replacing the name the user typed. If we appended an extension,
     // the file that now names may be a different, existing one.
@@ -256,8 +270,8 @@ void FileSession::onSavePicked(const fs::path& chosen, int filterIndex) {
     continueSave(target);
 }
 
-void FileSession::continueSave(const SaveTarget& target) {
-    if (target.format == ImageFormat::Jpeg) {
+void FileSession::continueSave(const Target& target) {
+    if (adapter_.formatNeedsOptions(target.format)) {
         pendingSave_ = target;
         jpegQuality_ = std::clamp(settings_.jpegQuality, 1, 100);
         request(Modal::JpegQuality);
@@ -266,7 +280,7 @@ void FileSession::continueSave(const SaveTarget& target) {
     finishSave(target, settings_.jpegQuality);
 }
 
-void FileSession::finishSave(const SaveTarget& target, int quality) {
+void FileSession::finishSave(const Target& target, int quality) {
     const Followup next = std::move(afterSave_);
     afterSave_ = {};
     if (writeFile(target.path, target.format, quality))
@@ -304,27 +318,33 @@ void FileSession::showOpenDialog() {
         return;
     }
     dialogOpen_ = true;
-    const FilterSet& filters = openFilters();
+    const FilterSet& filters = openFilters(adapter_);
     SDL_ShowOpenFileDialog(&FileSession::onDialogResult, reinterpret_cast<void*>(kOpenDialog), window_,
                            filters.filters.data(), static_cast<int>(filters.filters.size()),
                            lastDirectory_.empty() ? nullptr : lastDirectory_.c_str(), false);
 }
 
 void FileSession::showSaveDialog() {
+    if (adapter_.saveFormats().empty()) {
+        afterSave_ = {};
+        return;
+    }
     if (dialogEvent_ == 0) {
         afterSave_ = {};
         showMessage(tr(Str::ErrDialogUnavailable), true);
         return;
     }
-    // Suggest the current file, or "Untitled.png" in the folder last used.
+    // Suggest the current file, or "Untitled" with the first format's extension in the folder last used.
     fs::path suggestion = path_;
-    if (suggestion.empty())
-        suggestion = (lastDirectory_.empty() ? fs::path() : pathFromUtf8(lastDirectory_)) / "Untitled.png";
+    if (suggestion.empty()) {
+        const auto formats = adapter_.saveFormats();
+        const std::string name = formats.empty() ? std::string("Untitled") : std::string("Untitled.") + formats.front().extension;
+        suggestion = (lastDirectory_.empty() ? fs::path() : pathFromUtf8(lastDirectory_)) / name;
+    }
     dialogLocation_ = utf8FromPath(suggestion);
 
     dialogOpen_ = true;
-    const FilterSet& filters = saveFilters();
-    static_assert(kAllFormats.size() == 5, "saveFilters() lists one filter per format");
+    const FilterSet& filters = saveFilters(adapter_);
     SDL_ShowSaveFileDialog(&FileSession::onDialogResult, reinterpret_cast<void*>(kSaveDialog), window_,
                            filters.filters.data(), static_cast<int>(filters.filters.size()), dialogLocation_.c_str());
 }
@@ -382,7 +402,7 @@ std::string FileSession::displayName() const {
 }
 
 std::string FileSession::windowTitle() const {
-    return displayName() + (document_.isModified() ? "*" : "") + " - Trace";
+    return displayName() + (adapter_.isModified() ? "*" : "") + " - Trace";
 }
 
 void FileSession::rememberDirectory(const fs::path& file) {

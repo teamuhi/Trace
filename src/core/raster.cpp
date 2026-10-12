@@ -65,35 +65,51 @@ IRect drawLine(Image& img, int x0, int y0, int x1, int y1, const Paint& paint, b
     if (img.empty())
         return {};
 
-    // Work in 64 bits so extreme off-canvas coordinates cannot overflow the error term.
-    const std::int64_t dx = std::llabs(static_cast<std::int64_t>(x1) - x0);
-    const std::int64_t dy = -std::llabs(static_cast<std::int64_t>(y1) - y0);
-    const int sx = x0 < x1 ? 1 : -1;
-    const int sy = y0 < y1 ? 1 : -1;
-    std::int64_t err = dx + dy;
-
     IRect touched;
-    int x = x0;
-    int y = y0;
     bool first = true;
-    for (;;) {
+    forEachLinePixel(x0, y0, x1, y1, [&](int x, int y) {
         if ((includeStart || !first) && img.contains(x, y)) {
             applyPaint(img.row(y)[static_cast<std::size_t>(x)], paint, 255);
             touched = unionOf(touched, IRect{x, y, x + 1, y + 1});
         }
         first = false;
-        if (x == x1 && y == y1)
-            break;
-        const std::int64_t e2 = 2 * err;
-        if (e2 >= dy) {
-            err += dy;
-            x += sx;
+    });
+    return touched;
+}
+
+IRect stampSquareLine(Image& img, int x0, int y0, int x1, int y1, int size, const Paint& paint, StrokeMask* mask) {
+    if (img.empty() || size < 1)
+        return {};
+    if (mask && !mask->matches(img))
+        mask = nullptr;
+
+    const int before = size / 2; // pixels of the square to the left of / above the center pixel
+    const IRect bounds = imageBounds(img);
+    IRect touched;
+    forEachLinePixel(x0, y0, x1, y1, [&](int x, int y) {
+        // 64-bit so a stamp at an extreme coordinate cannot overflow while it is being rejected.
+        const std::int64_t left = std::int64_t{x} - before;
+        const std::int64_t top = std::int64_t{y} - before;
+        if (left >= bounds.x1 || top >= bounds.y1 || left + size <= bounds.x0 || top + size <= bounds.y0)
+            return; // entirely off the image
+        const IRect box = intersectionOf(
+            IRect{static_cast<int>(left), static_cast<int>(top), static_cast<int>(left) + size, static_cast<int>(top) + size},
+            bounds);
+        for (int py = box.y0; py < box.y1; ++py) {
+            const std::span<Rgba8> row = img.row(py);
+            for (int px = box.x0; px < box.x1; ++px) {
+                if (mask) {
+                    if (mask->get(px, py) != 0)
+                        continue; // this stroke already painted it
+                    mask->set(px, py, 255);
+                }
+                applyPaint(row[static_cast<std::size_t>(px)], paint, 255);
+            }
         }
-        if (e2 <= dx) {
-            err += dx;
-            y += sy;
-        }
-    }
+        touched = unionOf(touched, box);
+    });
+    if (mask)
+        mask->markTouched(touched);
     return touched;
 }
 
@@ -252,7 +268,7 @@ IRect strokeEllipse(Image& img, const IRect& box, int thickness, const Paint& pa
     return touched;
 }
 
-IRect floodFill(Image& img, int x, int y, Rgba8 color, int tolerance) {
+IRect floodFill(Image& img, int x, int y, Rgba8 color, int tolerance, bool contiguous) {
     if (!img.contains(x, y))
         return {};
 
@@ -265,6 +281,27 @@ IRect floodFill(Image& img, int x, int y, Rgba8 color, int tolerance) {
         return std::abs(static_cast<int>(p.r) - target.r) <= tol && std::abs(static_cast<int>(p.g) - target.g) <= tol &&
                std::abs(static_cast<int>(p.b) - target.b) <= tol && std::abs(static_cast<int>(p.a) - target.a) <= tol;
     };
+
+    if (!contiguous) {
+        IRect touched;
+        for (int py = 0; py < img.height(); ++py) {
+            const std::span<Rgba8> row = img.row(py);
+            int first = -1;
+            int last = -1;
+            for (int px = 0; px < img.width(); ++px) {
+                Rgba8& pixel = row[static_cast<std::size_t>(px)];
+                if (!matches(pixel))
+                    continue;
+                pixel = color;
+                if (first < 0)
+                    first = px;
+                last = px;
+            }
+            if (first >= 0)
+                touched = unionOf(touched, IRect{first, py, last + 1, py + 1});
+        }
+        return touched;
+    }
 
     const int w = img.width();
     const int h = img.height();

@@ -49,6 +49,33 @@ private:
     IRect touched_;
 };
 
+// Calls `visit(x, y)` for every pixel of the Bresenham line from (x0, y0) to (x1, y1), both ends included,
+// in order from the start. Works in 64 bits so extreme off-canvas coordinates cannot overflow the error term.
+template <class Visit>
+void forEachLinePixel(int x0, int y0, int x1, int y1, Visit&& visit) {
+    const std::int64_t dx = (x1 > x0 ? std::int64_t{x1} - x0 : std::int64_t{x0} - x1);
+    const std::int64_t dy = -(y1 > y0 ? std::int64_t{y1} - y0 : std::int64_t{y0} - y1);
+    const int sx = x0 < x1 ? 1 : -1;
+    const int sy = y0 < y1 ? 1 : -1;
+    std::int64_t err = dx + dy;
+    int x = x0;
+    int y = y0;
+    for (;;) {
+        visit(x, y);
+        if (x == x1 && y == y1)
+            break;
+        const std::int64_t e2 = 2 * err;
+        if (e2 >= dy) {
+            err += dy;
+            x += sx;
+        }
+        if (e2 <= dx) {
+            err += dx;
+            y += sy;
+        }
+    }
+}
+
 // Every function clips to the image and returns the pixels it may have changed (empty when none).
 // Out-of-range, non-finite or degenerate input is never an error: it simply draws nothing.
 
@@ -63,6 +90,13 @@ IRect drawLine(Image& img, int x0, int y0, int x1, int y1, const Paint& paint, b
 IRect drawCapsule(Image& img, Vec2f a, Vec2f b, float radius, const Paint& paint, bool antialias,
                   StrokeMask* mask = nullptr);
 
+// A `size` x `size` square stamped at every pixel of the line (x0, y0) - (x1, y1), as a hard-edged brush for
+// pixel art: the square covering pixel (x, y) spans x - size / 2 up to x - size / 2 + size - 1, so an odd
+// size is centered on the pixel. Pass the stroke's mask so overlapping stamps (and a translucent color) land
+// on each pixel once; a mask of the wrong size is ignored. A size below 1 draws nothing.
+IRect stampSquareLine(Image& img, int x0, int y0, int x1, int y1, int size, const Paint& paint,
+                      StrokeMask* mask = nullptr);
+
 IRect fillRect(Image& img, const IRect& rect, const Paint& paint);
 
 // Rectangle outline of `thickness` pixels drawn inside `rect`. Becomes a filled rectangle when the
@@ -75,7 +109,8 @@ IRect fillEllipse(Image& img, const IRect& box, const Paint& paint, int inset = 
 IRect strokeEllipse(Image& img, const IRect& box, int thickness, const Paint& paint);
 
 // Replaces the connected region around (x, y) whose pixels are within `tolerance` (0..255, compared per
-// channel against the seed pixel) with `color`.
-IRect floodFill(Image& img, int x, int y, Rgba8 color, int tolerance);
+// channel against the seed pixel) with `color`. With `contiguous` false every pixel of the image that is
+// within the tolerance of the seed is replaced, connected or not.
+IRect floodFill(Image& img, int x, int y, Rgba8 color, int tolerance, bool contiguous = true);
 
 } // namespace trace

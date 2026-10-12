@@ -13,13 +13,12 @@
 #include <optional>
 #include <string>
 
-#include "app/clipboard.hpp"
 #include "app/keybinds.hpp"
 #include "app/theme.hpp"
 #include "app/theme_io.hpp"
 #include "core/i18n.hpp"
-#include "tools/tool_text.hpp"
-#include "app/tools_panel.hpp"
+#include "io/path_utf8.hpp"
+#include "io/project_io.hpp"
 
 namespace trace {
 
@@ -31,32 +30,16 @@ constexpr int kIdleTimeoutMs = 1000; // also bounds the CPU/RAM refresh latency 
 constexpr int kFramesPerEvent = 3;   // ImGui needs a few frames to settle after input
 constexpr auto kStatsInterval = std::chrono::seconds(1);
 constexpr float kBaseFontSize = 14.0f;
-constexpr float kToolsPanelFraction = 0.11f;
-
-// Tools on the left, the canvas filling the rest (with its tab bar hidden).
-void buildDefaultLayout(ImGuiID dockId, ImVec2 size) {
-    ImGui::DockBuilderRemoveNode(dockId);
-    ImGui::DockBuilderAddNode(dockId, ImGuiDockNodeFlags_DockSpace);
-    ImGui::DockBuilderSetNodeSize(dockId, size);
-
-    ImGuiID left = 0;
-    ImGuiID right = 0;
-    ImGui::DockBuilderSplitNode(dockId, ImGuiDir_Left, kToolsPanelFraction, &left, &right);
-    ImGui::DockBuilderDockWindow("Tools", left);
-    ImGui::DockBuilderDockWindow("Canvas", right);
-    if (ImGuiDockNode* node = ImGui::DockBuilderGetNode(right))
-        node->LocalFlags |= ImGuiDockNodeFlags_NoTabBar;
-    ImGui::DockBuilderFinish(dockId);
-}
-
-// A menu entry whose shortcut text comes from the keymap, so it follows any rebinding.
-bool actionItem(const Keymap& keys, const char* label, Action action, bool* selected = nullptr,
-                bool enabled = true) {
-    const std::string shortcut = displayShortcut(keys, action);
-    return ImGui::MenuItem(label, shortcut.empty() ? nullptr : shortcut.c_str(), selected, enabled);
-}
 
 } // namespace
+
+App::App()
+    : workspaceContext_{settings_, settingsDirty_, toasts_, dialogs_,
+                        [this](const std::filesystem::path& path) { return routeOpen(path); }},
+      paint_(workspaceContext_),
+      flow_(workspaceContext_, Mode::Flowchart),
+      pixel_(workspaceContext_),
+      workspaces_{&paint_, &flow_, &pixel_} {}
 
 bool App::init() {
     SDL_SetAppMetadata("Trace", TRACE_VERSION, "com.trace.paint");
@@ -108,6 +91,7 @@ bool App::init() {
         io.IniFilename = nullptr;
     }
     loadSettings(settingsPath_, settings_); // falls back to defaults field by field
+    activeMode_ = settings_.mode;
 
     fonts_.init();
 
@@ -127,18 +111,6 @@ bool App::init() {
     }
     rendererBackend_ = true;
 
-    canvas_.init(renderer_);
-
-    FileSession::Hooks hooks;
-    hooks.documentReplaced = [this](bool createdBlank) {
-        if (createdBlank && settings_.newDocZoom == Settings::NewDocZoom::ActualSize)
-            canvas_.actualSize();
-        else
-            canvas_.fitToWindow();
-    };
-    hooks.settingsChanged = [this] { settingsDirty_ = true; };
-    hooks.saved = [this](const std::string& name) { toasts_.push(trf(Str::ToastSaved, {name})); };
-    files_.setHooks(std::move(hooks));
     dialogs_.init(window_);
     {
         const char* base = SDL_GetBasePath();
@@ -150,12 +122,8 @@ bool App::init() {
     }
     applyLanguage();
     applyFont();
-    if (!files_.init(window_))
-        SDL_Log("Native file dialogs are unavailable: no SDL event type could be registered");
-
-    toolbox_.settings() = settings_.toolDefaults;
-    toolbox_.select(settings_.startTool);
-    files_.newDocumentNow();
+    for (Workspace* ws : workspaces_)
+        ws->init(window_, renderer_); // Paint starts from a blank canvas
     settingsReady_ = true;
 
     running_ = true;
@@ -174,7 +142,7 @@ void App::run() {
                 handleEvent(event);
             } while (SDL_PollEvent(&event));
         }
-        if (!running_ || files_.exitApproved())
+        if (!running_ || exitApproved_)
             break;
 
         updateStats();
@@ -185,14 +153,14 @@ void App::run() {
         }
         if (toasts_.active() && framesToRender_ < 1)
             framesToRender_ = 1; // keep drawing until the last toast has faded out
-        if (files_.exitApproved())
+        if (exitApproved_)
             running_ = false;
     }
 }
 
 void App::shutdown() {
     if (settingsReady_ && settings_.restoreLastToolSettings)
-        settings_.toolDefaults = toolbox_.settings();
+        settings_.toolDefaults = paint_.toolbox().settings();
     saveSettingsNow();
     settingsReady_ = false;
     if (rendererBackend_) {
@@ -207,7 +175,8 @@ void App::shutdown() {
         ImGui::DestroyContext();
         imguiContext_ = false;
     }
-    canvas_.release();
+    for (Workspace* ws : workspaces_)
+        ws->release();
     if (renderer_) {
         SDL_DestroyRenderer(renderer_);
         renderer_ = nullptr;
@@ -232,13 +201,13 @@ void App::handleEvent(const SDL_Event& event) {
         onNativeDialog(dialogResult);
         return;
     }
-    if (files_.handleEvent(event))
+    if (workspace().fileSession().handleEvent(event))
         return; // a file dialog result or a dropped file
 
     switch (event.type) {
     case SDL_EVENT_QUIT:
     case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
-        files_.requestExit(); // asks about unsaved changes first; the loop stops once it is approved
+        beginExit(); // asks about unsaved changes first; the loop stops once every prompt is settled
         break;
     case SDL_EVENT_SYSTEM_THEME_CHANGED:
         handleSystemThemeChanged();
@@ -303,208 +272,182 @@ void App::renderFrame() {
 }
 
 void App::drawUi() {
-    canvas_.setPixelGridEnabled(settings_.pixelGrid);
-    canvas_.setPatterns(settings_.backdropPattern, settings_.transparencyPattern, settings_.patternSpacing);
-    canvas_.setRulersEnabled(settings_.showRulers);
-    canvas_.setGuidesVisible(settings_.showGuides);
-    canvas_.setSnapToGuides(settings_.snapToGuides);
-    document_.setHistoryLimit(static_cast<std::size_t>(settings_.historyLimitMb) * 1024u * 1024u);
-
     drawMenuBar();
     if (settings_.showStatusBar)
         drawStatusBar(); // must precede the dockspace so it reserves its work-area strip first
 
+    // Only the active mode dockspace is submitted; the other modes keep their layout in the ImGui settings.
+    // The mode may just have changed in the menu bar, so look it up now.
+    Workspace& ws = workspace();
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    const ImGuiID dockId = ImHashStr("TraceDockSpace");
-    const bool buildLayout = ImGui::DockBuilderGetNode(dockId) == nullptr; // no saved layout yet
+    const ImGuiID dockId = ws.dockSpaceId();
+    const bool buildLayout = ImGui::DockBuilderGetNode(dockId) == nullptr || ws.layoutStale(dockId); // no usable saved layout
     ImGui::DockSpaceOverViewport(dockId, viewport);
     if (buildLayout)
-        buildDefaultLayout(dockId, viewport->WorkSize);
+        ws.buildDefaultLayout(dockId, viewport->WorkSize);
 
-    if (settings_.showToolsPanel) {
-        if (ImGui::Begin("Tools", &settings_.showToolsPanel))
-            drawToolsPanel(toolbox_, settings_.keymap);
-        ImGui::End();
-        settingsDirty_ |= !settings_.showToolsPanel; // closed with its title bar button
-    }
+    ws.drawWindows();
 
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-    constexpr ImGuiWindowFlags canvasFlags = ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
-    if (ImGui::Begin("Canvas", nullptr, canvasFlags))
-        canvas_.draw(document_, toolbox_);
-    ImGui::End();
-    ImGui::PopStyleVar();
-
-    settingsDirty_ |= settingsWindow_.draw(settings_, toolbox_, settingsPath_, dialogs_, languages_);
-    files_.drawModals();
-    if (const auto outcome = imageDialogs_.draw(document_, toolbox_.settings().secondary)) {
-        if (outcome->error)
-            files_.report(outcome->text, true);
-        else
-            toasts_.push(outcome->text);
-    }
+    settingsDirty_ |= settingsWindow_.draw(settings_, paint_.toolbox(), settingsPath_, dialogs_, languages_);
+    ws.drawDialogs();
     toasts_.draw();
 
-    const std::string title = files_.windowTitle();
+    const std::string title = ws.fileSession().hasDocument()
+                                  ? ws.fileSession().windowTitle()
+                                  : std::string(tr(modeString(activeMode_))) + " - Trace";
     if (title != windowTitle_) {
         windowTitle_ = title;
         SDL_SetWindowTitle(window_, windowTitle_.c_str());
     }
 
     handleShortcuts();
+    tickExit();
 }
 
 void App::handleShortcuts() {
-    if (files_.busy() || imageDialogs_.busy() || dialogs_.busy())
+    Workspace& ws = workspace();
+    if (ws.busy() || dialogs_.busy())
         return; // a dialog or prompt is open: shortcuts must not act behind it
 
     const Keymap& keys = settings_.keymap;
+    const ModeContext context = modeContext(activeMode_);
+    // Only actions that are live in the active mode can fire, so one chord never acts twice.
+    const auto fire = [&](Action action, bool repeat = false) { return triggeredIn(keys, action, context, repeat); };
 
-    // File and history shortcuts wait until the current gesture is finished.
-    if (!toolbox_.gestureActive()) {
-        if (triggered(keys, Action::NewCanvas))
-            files_.requestNew();
-        if (triggered(keys, Action::OpenFile))
-            files_.requestOpen();
-        if (triggered(keys, Action::SaveFile))
-            files_.requestSave();
-        if (triggered(keys, Action::SaveFileAs))
-            files_.requestSaveAs();
-        if (triggered(keys, Action::Undo))
-            document_.undo();
-        if (triggered(keys, Action::Redo))
-            document_.redo();
-        if (triggered(keys, Action::DeleteSelection))
-            deleteSelection();
-        if (triggered(keys, Action::ResizeImage))
-            imageDialogs_.openResize(document_);
-        if (triggered(keys, Action::CanvasSize))
-            imageDialogs_.openCanvasSize(document_);
-        if (triggered(keys, Action::CropToSelection))
-            cropToSelection();
-        // Ctrl+C, V, X and A belong to a focused text field (a hex color, a number) when there is one.
-        if (!ImGui::GetIO().WantTextInput) {
-            if (triggered(keys, Action::Cut))
-                copySelection(true);
-            if (triggered(keys, Action::Copy))
-                copySelection(false);
-            if (triggered(keys, Action::Paste))
-                pasteClipboard();
-            if (triggered(keys, Action::SelectAll))
-                selectAll();
-            if (triggered(keys, Action::Deselect))
-                document_.clearSelection();
+    for (const Mode mode : kAllModes) {
+        if (fire(modeAction(mode))) {
+            switchMode(mode);
+            return; // this frame keys were meant for the old mode
         }
     }
-    if (triggered(keys, Action::OpenSettings))
+
+    // File and history shortcuts wait until the current gesture is finished.
+    if (!ws.gestureActive()) {
+        FileSession& files = ws.fileSession();
+        if (fire(Action::NewCanvas))
+            files.requestNew();
+        if (fire(Action::OpenFile))
+            files.requestOpen();
+        if (fire(Action::SaveFile))
+            files.requestSave();
+        if (fire(Action::SaveFileAs))
+            files.requestSaveAs();
+        if (fire(Action::Export) && ws.canExport())
+            ws.requestExport();
+        if (fire(Action::Undo))
+            ws.undo();
+        if (fire(Action::Redo))
+            ws.redo();
+        if (fire(Action::DeleteSelection))
+            ws.deleteSelection();
+        // Ctrl+C, V, X and A belong to a focused text field (a hex color, a number) when there is one.
+        if (!ImGui::GetIO().WantTextInput) {
+            if (fire(Action::Cut))
+                ws.cut();
+            if (fire(Action::Copy))
+                ws.copy();
+            if (fire(Action::Paste))
+                ws.paste();
+            if (fire(Action::SelectAll))
+                ws.selectAll();
+        }
+    }
+    if (fire(Action::OpenSettings))
         settingsWindow_.open();
-    if (triggered(keys, Action::ZoomIn))
-        canvas_.zoomIn();
-    if (triggered(keys, Action::ZoomOut))
-        canvas_.zoomOut();
-    if (triggered(keys, Action::FitToWindow))
-        canvas_.fitToWindow();
-    if (triggered(keys, Action::ActualSize))
-        canvas_.actualSize();
-    if (triggered(keys, Action::TogglePixelGrid)) {
-        settings_.pixelGrid = !settings_.pixelGrid;
-        settingsDirty_ = true;
-    }
-    if (triggered(keys, Action::ToggleRulers)) {
-        settings_.showRulers = !settings_.showRulers;
-        settingsDirty_ = true;
-    }
-    if (triggered(keys, Action::ToggleGuides)) {
-        settings_.showGuides = !settings_.showGuides;
-        settingsDirty_ = true;
-    }
-    if (triggered(keys, Action::ToggleSnapToGuides)) {
-        settings_.snapToGuides = !settings_.snapToGuides;
-        settingsDirty_ = true;
-    }
+    if (fire(Action::ZoomIn))
+        ws.zoomIn();
+    if (fire(Action::ZoomOut))
+        ws.zoomOut();
+    if (fire(Action::FitToWindow))
+        ws.fit();
+    if (fire(Action::ActualSize))
+        ws.actualSize();
 
-    for (int i = 0; i < kToolCount; ++i) {
-        const ToolId id = static_cast<ToolId>(i);
-        if (triggered(keys, toolAction(id)))
-            toolbox_.select(id);
-    }
-    if (triggered(keys, Action::SwapColors))
-        toolbox_.swapColors();
-
-    const int step = (triggered(keys, Action::IncreaseSize, true) ? 1 : 0) -
-                     (triggered(keys, Action::DecreaseSize, true) ? 1 : 0);
-    if (step != 0) {
-        ToolSettings& s = toolbox_.settings();
-        const ToolId tool = toolbox_.current();
-        const bool shape = tool == ToolId::Line || tool == ToolId::Rectangle || tool == ToolId::Ellipse;
-        int& size = shape ? s.strokeWidth : s.brushSize;
-        size = std::clamp(size + step, ToolSettings::kMinSize,
-                          shape ? ToolSettings::kMaxStrokeWidth : ToolSettings::kMaxSize);
-    }
+    ws.handleShortcuts(keys);
 }
 
-Rgba8 App::clearColor() const {
-    const ToolSettings& t = toolbox_.settings();
-    return t.eraseToTransparent ? Rgba8{} : t.secondary; // what the eraser would leave
+// --- modes and exit ----------------------------------------------------------------------------
+
+bool App::canSwitchMode() noexcept {
+    return workspace().canLeave() && !dialogs_.busy();
 }
 
-void App::copySelection(bool cut) {
-    if (!document_.selection().active())
+bool App::switchMode(Mode target, bool force) {
+    if (target == activeMode_)
+        return true;
+    if (!force && !canSwitchMode())
+        return false;
+    activeMode_ = target;
+    settings_.mode = target;
+    settingsDirty_ = true;
+    framesToRender_ = std::max(framesToRender_, kFramesPerEvent); // a first-time dock layout needs a few frames
+    return true;
+}
+
+bool App::routeOpen(const std::filesystem::path& path) {
+    Mode target = Mode::Paint; // anything that is not a project is an image
+    if (const std::optional<std::uint32_t> kind = sniffProjectKind(path)) {
+        FileSession& session = workspace().fileSession();
+        if (*kind == kProjectFlow) {
+            target = Mode::Flowchart;
+        } else if (*kind == kProjectPixel) {
+            target = Mode::PixelArt;
+        } else {
+            session.report(trf(Str::ErrProjectUnknown, {utf8FromPath(path.filename())}), true);
+            return true;
+        }
+        if (!workspace(target).opensProjects()) {
+            session.report(trf(Str::ErrModeNotReady, {tr(modeString(target))}), true);
+            return true;
+        }
+    }
+    if (target == activeMode_)
+        return false; // the active workspace opens it
+    if (!switchMode(target))
+        return true; // cannot leave right now; the request is dropped like any request made while busy
+    workspace(target).fileSession().requestOpenPath(path);
+    return true;
+}
+
+void App::beginExit() {
+    if (exitPending_ || workspace().busy())
         return;
-    const Image pixels = document_.copySelection();
-    if (pixels.empty())
-        return; // the selection is entirely off the image
-    if (!setClipboardImage(pixels)) {
-        toasts_.push(tr(Str::ErrClipboardCopy), Toasts::Kind::Error);
-        return;
-    }
-    toasts_.push(tr(cut ? Str::ToastCut : Str::ToastCopied));
-    if (cut)
-        deleteSelection();
+    exitPending_ = true;
+    exitStep_ = 0;
+    exitFirst_ = activeMode_;
+    exitCurrent_ = nullptr;
+    tickExit();
 }
 
-void App::pasteClipboard() {
-    LoadResult result = getClipboardImage();
-    if (!result.image) {
-        toasts_.push(result.error, Toasts::Kind::Error);
+void App::tickExit() {
+    if (!exitPending_)
+        return;
+
+    if (exitCurrent_) {
+        FileSession& session = exitCurrent_->fileSession();
+        if (session.busy())
+            return; // its prompt, or the save it started, is still going
+        const bool approved = session.exitApproved();
+        session.cancelExit();
+        exitCurrent_ = nullptr;
+        if (!approved) { // cancelled (or the save failed): stay
+            exitPending_ = false;
+            return;
+        }
+    }
+
+    while (exitStep_ < kModeCount) {
+        const Mode mode = static_cast<Mode>((static_cast<int>(exitFirst_) + exitStep_++) % kModeCount);
+        Workspace& ws = workspace(mode);
+        if (!ws.fileSession().hasUnsavedChanges())
+            continue;
+        switchMode(mode, true); // show what is being asked about
+        exitCurrent_ = &ws;
+        ws.fileSession().requestExit();
         return;
     }
-    // Drop it at the top-left of what is visible, so it always lands where the user is looking.
-    const Vec2f origin = canvas_.visibleImageOrigin();
-    const int x = std::max(0, static_cast<int>(std::floor(origin.x)));
-    const int y = std::max(0, static_cast<int>(std::floor(origin.y)));
-    if (!document_.paste(std::move(*result.image), x, y)) {
-        files_.report(tr(Str::ErrPasteMemory), true);
-        return;
-    }
-    toolbox_.select(ToolId::Select); // so it can be dragged into place straight away
-    document_.commit();
-}
-
-void App::deleteSelection() {
-    if (!document_.selection().active())
-        return;
-    document_.deleteSelection(clearColor());
-    document_.commit();
-}
-
-void App::cropToSelection() {
-    switch (document_.cropToSelection()) {
-    case Document::TransformResult::NoMemory:
-        files_.report(tr(Str::ErrCropMemory), true);
-        break;
-    case Document::TransformResult::Applied:
-        toasts_.push(trf(Str::ToastCropped,
-                         {std::to_string(document_.image().width()), std::to_string(document_.image().height())}));
-        break;
-    case Document::TransformResult::Nothing:
-        break;
-    }
-}
-
-void App::selectAll() {
-    toolbox_.select(ToolId::Select);
-    document_.selectAll();
+    exitPending_ = false;
+    exitApproved_ = true;
 }
 
 void App::applyAppearance() {
@@ -563,6 +506,10 @@ void App::onNativeDialog(const NativeDialogs::Result& result) {
     }
     if (result.cancelled || result.path.empty())
         return;
+    if (!NativeDialogs::isSettingsTag(result.tag)) {
+        workspace().onNativeDialog(result); // an import, export or palette of the active mode
+        return;
+    }
 
     switch (result.tag) {
     case NativeDialogs::Tag::FontFile:
@@ -611,6 +558,8 @@ void App::onNativeDialog(const NativeDialogs::Result& result) {
             toasts_.push(tr(Str::ToastLanguageTemplate));
         break;
     }
+    default:
+        break; // the other tags belong to a workspace and were handled above
     }
 }
 
@@ -624,91 +573,70 @@ void App::saveSettingsNow() {
 void App::drawMenuBar() {
     if (!ImGui::BeginMainMenuBar())
         return;
+    Workspace& ws = workspace();
     const Keymap& keys = settings_.keymap;
+    FileSession& files = ws.fileSession();
 
     if (ImGui::BeginMenu(tr(Str::MenuFile))) {
-        if (actionItem(keys, tr(Str::MenuNew), Action::NewCanvas))
-            files_.requestNew();
-        if (actionItem(keys, tr(Str::MenuOpen), Action::OpenFile))
-            files_.requestOpen();
+        const bool document = files.hasDocument();
+        if (actionMenuItem(keys, tr(Str::MenuNew), Action::NewCanvas, nullptr, document))
+            files.requestNew();
+        if (actionMenuItem(keys, tr(Str::MenuOpen), Action::OpenFile))
+            files.requestOpen();
         ImGui::Separator();
-        if (actionItem(keys, tr(Str::MenuSave), Action::SaveFile))
-            files_.requestSave();
-        if (actionItem(keys, tr(Str::MenuSaveAs), Action::SaveFileAs))
-            files_.requestSaveAs();
+        if (actionMenuItem(keys, tr(Str::MenuSave), Action::SaveFile, nullptr, document))
+            files.requestSave();
+        if (actionMenuItem(keys, tr(Str::MenuSaveAs), Action::SaveFileAs, nullptr, document))
+            files.requestSaveAs();
+        if (actionMenuItem(keys, tr(Str::MenuExport), Action::Export, nullptr, ws.canExport()))
+            ws.requestExport();
         ImGui::Separator();
-        if (actionItem(keys, tr(Str::MenuSettings), Action::OpenSettings))
+        if (actionMenuItem(keys, tr(Str::MenuSettings), Action::OpenSettings))
             settingsWindow_.open();
         ImGui::Separator();
         if (ImGui::MenuItem(tr(Str::MenuExit)))
-            files_.requestExit();
+            beginExit();
         ImGui::EndMenu();
     }
 
     if (ImGui::BeginMenu(tr(Str::MenuEdit))) {
-        const bool idle = !toolbox_.gestureActive();
-        if (actionItem(keys, tr(Str::MenuUndo), Action::Undo, nullptr, idle && document_.canUndo()))
-            document_.undo();
-        if (actionItem(keys, tr(Str::MenuRedo), Action::Redo, nullptr, idle && document_.canRedo()))
-            document_.redo();
+        if (actionMenuItem(keys, tr(Str::MenuUndo), Action::Undo, nullptr, ws.canUndo()))
+            ws.undo();
+        if (actionMenuItem(keys, tr(Str::MenuRedo), Action::Redo, nullptr, ws.canRedo()))
+            ws.redo();
         ImGui::Separator();
-        const bool selected = idle && document_.selection().active();
-        if (actionItem(keys, tr(Str::MenuCut), Action::Cut, nullptr, selected))
-            copySelection(true);
-        if (actionItem(keys, tr(Str::MenuCopy), Action::Copy, nullptr, selected))
-            copySelection(false);
-        if (actionItem(keys, tr(Str::MenuPaste), Action::Paste, nullptr, idle && clipboardHasImage()))
-            pasteClipboard();
-        if (actionItem(keys, tr(Str::MenuDelete), Action::DeleteSelection, nullptr, selected))
-            deleteSelection();
+        if (actionMenuItem(keys, tr(Str::MenuCut), Action::Cut, nullptr, ws.canCut()))
+            ws.cut();
+        if (actionMenuItem(keys, tr(Str::MenuCopy), Action::Copy, nullptr, ws.canCopy()))
+            ws.copy();
+        if (actionMenuItem(keys, tr(Str::MenuPaste), Action::Paste, nullptr, ws.canPaste()))
+            ws.paste();
+        if (actionMenuItem(keys, tr(Str::MenuDelete), Action::DeleteSelection, nullptr, ws.canDeleteSelection()))
+            ws.deleteSelection();
         ImGui::Separator();
-        if (actionItem(keys, tr(Str::MenuSelectAll), Action::SelectAll, nullptr, idle))
-            selectAll();
-        if (actionItem(keys, tr(Str::MenuDeselect), Action::Deselect, nullptr, selected))
-            document_.clearSelection();
-        ImGui::Separator();
-        if (actionItem(keys, tr(Str::MenuSwapColors), Action::SwapColors))
-            toolbox_.swapColors();
+        if (actionMenuItem(keys, tr(Str::MenuSelectAll), Action::SelectAll, nullptr, ws.canSelectAll()))
+            ws.selectAll();
+        if (actionMenuItem(keys, tr(Str::MenuDeselect), Action::Deselect, nullptr, ws.canDeselect()))
+            ws.deselect();
+        ws.drawEditMenuExtras();
         ImGui::EndMenu();
     }
 
-    if (ImGui::BeginMenu(tr(Str::MenuImage))) {
-        const bool idle = !toolbox_.gestureActive();
-        if (actionItem(keys, tr(Str::MenuResize), Action::ResizeImage, nullptr, idle))
-            imageDialogs_.openResize(document_);
-        if (actionItem(keys, tr(Str::MenuCanvasSize), Action::CanvasSize, nullptr, idle))
-            imageDialogs_.openCanvasSize(document_);
-        ImGui::Separator();
-        if (actionItem(keys, tr(Str::MenuCropToSelection), Action::CropToSelection, nullptr,
-                       idle && document_.selection().active()))
-            cropToSelection();
-        ImGui::EndMenu();
-    }
+    ws.drawModeMenus();
 
     if (ImGui::BeginMenu(tr(Str::MenuView))) {
-        if (actionItem(keys, tr(Str::MenuZoomIn), Action::ZoomIn))
-            canvas_.zoomIn();
-        if (actionItem(keys, tr(Str::MenuZoomOut), Action::ZoomOut))
-            canvas_.zoomOut();
-        if (actionItem(keys, tr(Str::MenuFitToWindow), Action::FitToWindow))
-            canvas_.fitToWindow();
-        if (actionItem(keys, tr(Str::MenuActualSize), Action::ActualSize))
-            canvas_.actualSize();
+        const bool zoom = ws.canZoom();
+        if (actionMenuItem(keys, tr(Str::MenuZoomIn), Action::ZoomIn, nullptr, zoom))
+            ws.zoomIn();
+        if (actionMenuItem(keys, tr(Str::MenuZoomOut), Action::ZoomOut, nullptr, zoom))
+            ws.zoomOut();
+        if (actionMenuItem(keys, tr(Str::MenuFitToWindow), Action::FitToWindow, nullptr, zoom))
+            ws.fit();
+        if (actionMenuItem(keys, tr(Str::MenuActualSize), Action::ActualSize, nullptr, zoom))
+            ws.actualSize();
         ImGui::Separator();
 
-        if (actionItem(keys, tr(Str::MenuPixelGrid), Action::TogglePixelGrid, &settings_.pixelGrid))
-            settingsDirty_ = true;
-        if (actionItem(keys, tr(Str::MenuRulers), Action::ToggleRulers, &settings_.showRulers))
-            settingsDirty_ = true;
-        if (actionItem(keys, tr(Str::MenuGuides), Action::ToggleGuides, &settings_.showGuides))
-            settingsDirty_ = true;
-        if (actionItem(keys, tr(Str::MenuSnapToGuides), Action::ToggleSnapToGuides, &settings_.snapToGuides,
-                       settings_.showGuides))
-            settingsDirty_ = true;
-        if (ImGui::MenuItem(tr(Str::MenuClearGuides), nullptr, false, !document_.guides().empty()))
-            document_.guides().clear();
-        if (ImGui::MenuItem(tr(Str::MenuToolsPanel), nullptr, &settings_.showToolsPanel))
-            settingsDirty_ = true;
+        ws.drawViewMenuItems();
         if (ImGui::MenuItem(tr(Str::MenuStatusBar), nullptr, &settings_.showStatusBar))
             settingsDirty_ = true;
         ImGui::Separator();
@@ -734,7 +662,96 @@ void App::drawMenuBar() {
         ImGui::EndMenu();
     }
 
+    drawModeSwitcher();
     ImGui::EndMainMenuBar();
+}
+
+// Paint | Flowchart | Pixel Art, right-aligned in the menu bar. The shown mode is filled with the accent color
+// (and the text color that reads on it); the others use the button colors, so it follows the theme. While the
+// mode cannot change (a gesture, a dialog) it is drawn dimmed and ignores clicks.
+void App::drawModeSwitcher() {
+    const ThemeTokens& t = tokens();
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const float height = ImGui::GetFrameHeight();
+    const float inset = std::round(style.FramePadding.y * 0.5f);
+    const float padX = std::round(ImGui::GetFontSize() * 0.9f);
+    const float rounding = std::round((height - 2.0f * inset) * 0.3f);
+    const bool enabled = canSwitchMode();
+    const float alpha = enabled ? 1.0f : style.DisabledAlpha;
+
+    float widths[kModeCount];
+    float total = 0.0f;
+    for (const Mode mode : kAllModes) {
+        const float w = std::round(ImGui::CalcTextSize(tr(modeString(mode))).x + 2.0f * padX);
+        widths[static_cast<int>(mode)] = w;
+        total += w;
+    }
+
+    const ImVec2 menuEnd = ImGui::GetCursorScreenPos();
+    const float rightEdge = ImGui::GetWindowPos().x + ImGui::GetWindowWidth() - std::round(ImGui::GetFontSize() * 0.5f);
+    const float startX = std::max(rightEdge - total, menuEnd.x + style.ItemSpacing.x); // never over the menus
+    ImGui::SetCursorScreenPos(ImVec2(startX, menuEnd.y));
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const auto withAlpha = [alpha](ImVec4 c) {
+        c.w *= alpha;
+        return ImGui::ColorConvertFloat4ToU32(c);
+    };
+    const ImVec4 onAccent = contrastText(t.accent);
+    const ImVec2 first = ImGui::GetCursorScreenPos();
+    float x = first.x;
+
+    for (const Mode mode : kAllModes) {
+        const int index = static_cast<int>(mode);
+        ImGui::PushID(index);
+        ImGui::SetCursorScreenPos(ImVec2(x, first.y));
+        ImGui::InvisibleButton("##mode", ImVec2(widths[index], height));
+        x += widths[index];
+        const bool clicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
+        const bool hovered = ImGui::IsItemHovered();
+        const bool held = ImGui::IsItemActive();
+        const ImVec2 p0 = ImGui::GetItemRectMin();
+        const ImVec2 p1 = ImGui::GetItemRectMax();
+
+        const bool selected = mode == activeMode_;
+        ImVec4 fill = t.button;
+        ImVec4 text = t.text;
+        if (selected) {
+            fill = t.accent;
+            text = onAccent;
+        } else if (enabled && held) {
+            fill = ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive);
+        } else if (enabled && hovered) {
+            fill = ImGui::GetStyleColorVec4(ImGuiCol_ButtonHovered);
+        }
+
+        const ImDrawFlags corners = index == 0                  ? ImDrawFlags_RoundCornersLeft
+                                    : index == kModeCount - 1 ? ImDrawFlags_RoundCornersRight
+                                                                : ImDrawFlags_RoundCornersNone;
+        const ImVec2 a(p0.x, p0.y + inset);
+        const ImVec2 b(p1.x, p1.y - inset);
+        dl->AddRectFilled(a, b, withAlpha(fill), rounding, corners);
+        if (index > 0)
+            dl->AddLine(ImVec2(a.x, a.y), ImVec2(a.x, b.y), withAlpha(ImGui::GetStyleColorVec4(ImGuiCol_Border)));
+
+        const char* label = tr(modeString(mode));
+        const ImVec2 size = ImGui::CalcTextSize(label);
+        dl->AddText(ImVec2(std::round(p0.x + (widths[index] - size.x) * 0.5f), std::round(p0.y + (height - size.y) * 0.5f)),
+                    withAlpha(text), label);
+
+        if (hovered) {
+            const std::string shortcut = displayShortcut(settings_.keymap, modeAction(mode));
+            const std::string name = label;
+            ImGui::SetTooltip("%s", (shortcut.empty() ? trf(Str::ModeSwitchTip, {name})
+                                                      : trf(Str::ModeSwitchTipKey, {name, shortcut}))
+                                        .c_str());
+        }
+        if (clicked && enabled)
+            switchMode(mode);
+        ImGui::PopID();
+    }
+    dl->AddRect(ImVec2(first.x, first.y + inset), ImVec2(first.x + total, first.y + height - inset),
+                withAlpha(ImGui::GetStyleColorVec4(ImGuiCol_Border)), rounding);
 }
 
 void App::drawStatusBar() {
@@ -744,16 +761,7 @@ void App::drawStatusBar() {
     ImGui::PushStyleColor(ImGuiCol_Text, tokens().text);
     constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings;
     if (ImGui::BeginViewportSideBar("##StatusBar", ImGui::GetMainViewport(), ImGuiDir_Down, height, flags)) {
-        char zoom[24];
-        std::snprintf(zoom, sizeof(zoom), "%.0f", static_cast<double>(canvas_.zoomPercent()));
-        const std::string widthText = std::to_string(document_.image().width());
-        const std::string heightText = std::to_string(document_.image().height());
-        const char* tool = tr(toolString(toolbox_.current()));
-        const std::string left =
-            canvas_.hasHoverPixel()
-                ? trf(Str::StatusHover, {tool, std::to_string(canvas_.hoverX()), std::to_string(canvas_.hoverY()), widthText,
-                                         heightText, zoom})
-                : trf(Str::StatusIdle, {tool, widthText, heightText, zoom});
+        const std::string left = workspace().statusLeft();
         ImGui::TextUnformatted(left.c_str());
 
         if (settings_.showSysStats) {

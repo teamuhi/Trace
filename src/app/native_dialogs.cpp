@@ -50,6 +50,28 @@ const FilterSet& filtersFor(NativeDialogs::Tag tag) {
         pattern = "ini";
         name = Str::FilterLanguage;
         break;
+    case NativeDialogs::Tag::ImportImage:
+        pattern = "png;jpg;jpeg;bmp;tga;gif";
+        name = Str::FilterImages;
+        break;
+    case NativeDialogs::Tag::ExportPng:
+    case NativeDialogs::Tag::ExportSheet:
+        pattern = "png";
+        name = Str::FilterPng;
+        break;
+    case NativeDialogs::Tag::ExportSvg:
+        pattern = "svg";
+        name = Str::FilterSvg;
+        break;
+    case NativeDialogs::Tag::ExportGif:
+        pattern = "gif";
+        name = Str::FilterGif;
+        break;
+    case NativeDialogs::Tag::PaletteLoad:
+    case NativeDialogs::Tag::PaletteSave:
+        pattern = "gpl;hex";
+        name = Str::FilterPalette;
+        break;
     }
     set.names[0] = tr(name);
     set.names[1] = tr(Str::FilterAllFiles);

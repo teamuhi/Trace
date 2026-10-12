@@ -15,7 +15,8 @@ class FillTool final : public Tool {
 public:
     void press(Document& doc, ToolSettings& s, const PointerEvent& ev) override {
         const Vec2f p = sanitize(ev.pos);
-        doc.markDirty(floodFill(doc.image(), toPixel(p.x), toPixel(p.y), activeColor(s, ev), s.fillTolerance));
+        doc.markDirty(floodFill(doc.image(), toPixel(p.x), toPixel(p.y), activeColor(s, ev), s.fillTolerance,
+                                !s.fillGlobal));
     }
     void drag(Document&, ToolSettings&, const PointerEvent&) override {}
     void release(Document&, ToolSettings&, const PointerEvent&) override {}

@@ -549,3 +549,117 @@ TEST_CASE("encodeImage and decodeImage round-trip in memory (the clipboard path)
     CHECK(named.error.find("clipboard image") != std::string::npos);
     CHECK_FALSE(decodeImage({}).image.has_value());
 }
+
+// --- animated GIF ---------------------------------------------------------------------------------
+
+namespace {
+
+// The delay (centiseconds) of every frame, read from the Graphic Control Extension blocks (21 F9 04 ...).
+std::vector<int> gifDelays(const std::vector<unsigned char>& d) {
+    std::vector<int> delays;
+    for (std::size_t i = 0; i + 7 < d.size(); ++i) {
+        if (d[i] == 0x21 && d[i + 1] == 0xF9 && d[i + 2] == 0x04)
+            delays.push_back(d[i + 4] | (d[i + 5] << 8));
+    }
+    return delays;
+}
+
+std::vector<Image> solidFrames(int count, int w = 8, int h = 6) {
+    const Rgba8 colors[] = {kRed, kGreen, kBlue, kWhite};
+    std::vector<Image> frames;
+    for (int i = 0; i < count; ++i)
+        frames.emplace_back(w, h, colors[i % 4]);
+    return frames;
+}
+
+} // namespace
+
+TEST_CASE("saveAnimatedGif writes frames that loadImage counts") {
+    TempDir dir;
+    const std::vector<Image> frames = solidFrames(3);
+    const std::vector<int> delays = {10, 20, 30};
+    REQUIRE(saveAnimatedGif(dir / "anim.gif", frames, delays).empty());
+
+    LoadResult loaded = loadImage(dir / "anim.gif");
+    REQUIRE(loaded.image.has_value());
+    CHECK(loaded.frameCount == 3);
+    CHECK(loaded.image->width() == 8);
+    CHECK(loaded.image->height() == 6);
+    CHECK(channelDiff(loaded.image->get(0, 0), kRed) <= 8); // the first frame is the one that opens
+    CHECK(gifDelays(readAll(dir / "anim.gif")) == delays);
+    CHECK_FALSE(fs::exists(dir / "anim.gif.trace-tmp"));
+}
+
+TEST_CASE("saveAnimatedGif raises short delays and fills in missing ones") {
+    TempDir dir;
+    const std::vector<Image> frames = solidFrames(4);
+    const std::vector<int> delays = {0, 1, -5}; // the fourth is missing
+    REQUIRE(saveAnimatedGif(dir / "d.gif", frames, delays).empty());
+    const std::vector<int> written = gifDelays(readAll(dir / "d.gif"));
+    REQUIRE(written.size() == 4);
+    CHECK(written[0] == kMinGifDelayCs);
+    CHECK(written[1] == kMinGifDelayCs);
+    CHECK(written[2] == kMinGifDelayCs);
+    CHECK(written[3] == kDefaultGifDelayCs);
+
+    // A huge delay fits in the 16-bit field instead of wrapping around.
+    const std::vector<int> big = {1000000, 5, 5, 5};
+    REQUIRE(saveAnimatedGif(dir / "big.gif", frames, big).empty());
+    CHECK(gifDelays(readAll(dir / "big.gif"))[0] == 65535);
+}
+
+TEST_CASE("saveAnimatedGif alpha threshold decides what is transparent, and restores the encoder") {
+    TempDir dir;
+    std::vector<Image> frames;
+    for (int i = 0; i < 2; ++i) {
+        Image img(4, 4, kWhite);
+        img.set(0, 0, Rgba8{255, 0, 0, 40}); // mostly transparent
+        img.set(1, 0, Rgba8{255, 0, 0, 200}); // mostly opaque
+        frames.push_back(std::move(img));
+    }
+    const std::vector<int> delays = {10, 10};
+
+    REQUIRE(saveAnimatedGif(dir / "t.gif", frames, delays, 128).empty());
+    LoadResult cut = loadImage(dir / "t.gif");
+    REQUIRE(cut.image.has_value());
+    CHECK(cut.image->get(0, 0).a == 0);
+    CHECK(cut.image->get(1, 0).a == 255);
+    CHECK(cut.image->get(2, 2).a == 255);
+
+    // Threshold 0 keeps every pixel opaque.
+    REQUIRE(saveAnimatedGif(dir / "o.gif", frames, delays, 0).empty());
+    LoadResult opaque = loadImage(dir / "o.gif");
+    REQUIRE(opaque.image.has_value());
+    CHECK(opaque.image->get(0, 0).a == 255);
+
+    // The encoder global is back to "no transparency", so a plain still GIF is not affected.
+    REQUIRE(saveImage(dir / "still.gif", frames[0], ImageFormat::Gif).empty());
+    CHECK(loadImage(dir / "still.gif").image->get(0, 0).a == 0); // saveImage uses its own threshold (128)
+    CHECK(msf_gif_alpha_threshold == 0);
+}
+
+TEST_CASE("saveAnimatedGif rejects frames it cannot write and leaves existing files alone") {
+    TempDir dir;
+    const fs::path path = dir / "keep.gif";
+    REQUIRE(saveImage(path, sampleImage(), ImageFormat::Gif).empty());
+    const std::vector<unsigned char> before = readAll(path);
+
+    const std::vector<int> delays = {10, 10};
+    CHECK_FALSE(saveAnimatedGif(path, std::vector<Image>{}, delays).empty());
+    std::vector<Image> mixed = solidFrames(1, 8, 6);
+    mixed.emplace_back(9, 6, kRed); // a different size
+    CHECK_FALSE(saveAnimatedGif(path, mixed, delays).empty());
+    std::vector<Image> blank;
+    blank.emplace_back();
+    CHECK_FALSE(saveAnimatedGif(path, blank, delays).empty());
+    std::vector<Image> huge;
+    huge.emplace_back(kMaxImageDimension + 1, 1);
+    CHECK_FALSE(saveAnimatedGif(path, huge, delays).empty());
+
+    CHECK(readAll(path) == before);
+    CHECK_FALSE(fs::exists(dir / "keep.gif.trace-tmp"));
+
+    // A folder that does not exist is reported, not thrown.
+    const std::string error = saveAnimatedGif(dir / "no" / "such" / "x.gif", solidFrames(2), delays);
+    CHECK_FALSE(error.empty());
+}

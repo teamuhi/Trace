@@ -208,4 +208,91 @@ void drawToolIcon(ImDrawList* dl, ToolId tool, ImVec2 min, float size, ImU32 col
     }
 }
 
+void drawSettingsIcon(ImDrawList* dl, int page, ImVec2 min, float size, ImU32 color) {
+    const Canvas c(dl, min, size, color);
+    switch (page) {
+    case 0: { // General: a gear, a ring with eight teeth around a hub
+        c.circle(12.0f, 12.0f, 6.2f, false);
+        c.circle(12.0f, 12.0f, 2.3f, false);
+        for (int i = 0; i < 8; ++i) {
+            const float a = static_cast<float>(i) * 0.78539816f;
+            const float cs = std::cos(a);
+            const float sn = std::sin(a);
+            c.line(12.0f + cs * 7.4f, 12.0f + sn * 7.4f, 12.0f + cs * 10.4f, 12.0f + sn * 10.4f);
+        }
+        break;
+    }
+    case 1: // Theme: a disc with its right half filled
+        c.circle(12.0f, 12.0f, 9.0f, false);
+        c.fill({{12.0f, 3.0f}, {16.5f, 4.2f}, {19.8f, 7.5f}, {21.0f, 12.0f}, {19.8f, 16.5f}, {16.5f, 19.8f}, {12.0f, 21.0f}});
+        break;
+    case 2: // View: an eye
+        c.curve({2.0f, 12.0f}, {12.0f, 2.0f}, {22.0f, 12.0f});
+        c.curve({2.0f, 12.0f}, {12.0f, 22.0f}, {22.0f, 12.0f});
+        c.circle(12.0f, 12.0f, 3.3f, true);
+        break;
+    case 3: // Tools: the brush
+        drawToolIcon(dl, ToolId::Brush, min, size, color);
+        break;
+    case 4: // Pixel Art: a 3 x 3 grid of squares, some filled
+        for (int row = 0; row < 3; ++row) {
+            for (int col = 0; col < 3; ++col) {
+                const float x = 3.0f + static_cast<float>(col) * 6.0f;
+                const float y = 3.0f + static_cast<float>(row) * 6.0f;
+                if ((row + col) % 2 == 0)
+                    c.fill({{x, y}, {x + 5.0f, y}, {x + 5.0f, y + 5.0f}, {x, y + 5.0f}});
+                else
+                    c.rect(x + 0.5f, y + 0.5f, x + 4.5f, y + 4.5f, 0.0f);
+            }
+        }
+        break;
+    case 5: // Scripts: </>
+        c.polyline({{8.0f, 6.5f}, {2.8f, 12.0f}, {8.0f, 17.5f}}, false);
+        c.polyline({{16.0f, 6.5f}, {21.2f, 12.0f}, {16.0f, 17.5f}}, false);
+        c.line(14.0f, 4.5f, 10.0f, 19.5f);
+        break;
+    case 6: // Keybinds: a keyboard
+        c.rect(2.5f, 5.5f, 21.5f, 18.5f, 2.0f);
+        for (const float x : {6.5f, 10.2f, 13.8f, 17.5f}) {
+            c.circle(x, 9.3f, 1.1f, true);
+            c.circle(x, 12.3f, 1.1f, true);
+        }
+        c.line(8.0f, 15.5f, 16.0f, 15.5f);
+        break;
+    case 7: // About: an "i" in a circle
+        c.circle(12.0f, 12.0f, 9.0f, false);
+        c.circle(12.0f, 7.8f, 1.3f, true);
+        c.line(12.0f, 11.2f, 12.0f, 17.2f);
+        break;
+    default: // unknown page: nothing
+        break;
+    }
+}
+
+void drawUiIcon(ImDrawList* dl, UiIcon icon, ImVec2 min, float size, ImU32 color) {
+    const Canvas c(dl, min, size, color);
+    switch (icon) {
+    case UiIcon::Eye:
+    case UiIcon::EyeOff:
+        c.curve({1.5f, 12.0f}, {12.0f, 2.0f}, {22.5f, 12.0f});
+        c.curve({1.5f, 12.0f}, {12.0f, 22.0f}, {22.5f, 12.0f});
+        c.circle(12.0f, 12.0f, 3.3f, true);
+        if (icon == UiIcon::EyeOff)
+            c.line(3.5f, 20.5f, 20.5f, 3.5f);
+        break;
+    case UiIcon::Lock:
+    case UiIcon::Unlock: {
+        // A padlock: body, shackle and keyhole. Open, the right leg of the shackle is missing.
+        c.fill({{5.0f, 11.0f}, {19.0f, 11.0f}, {19.0f, 21.5f}, {5.0f, 21.5f}}, 0.3f);
+        c.rect(5.0f, 11.0f, 19.0f, 21.5f, 1.5f);
+        c.arc(12.0f, 8.0f, 3.8f, 3.1415927f, 6.2831855f);
+        c.line(8.2f, 8.0f, 8.2f, 11.0f);
+        if (icon == UiIcon::Lock)
+            c.line(15.8f, 8.0f, 15.8f, 11.0f);
+        c.circle(12.0f, 16.2f, 1.4f, true);
+        break;
+    }
+    }
+}
+
 } // namespace trace

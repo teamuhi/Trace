@@ -156,11 +156,41 @@ bool loadSettings(const std::string& path, Settings& out) {
     readEnum(ini, "tools", "shape_mode", t.shapeMode, kShapeModeNames);
     readInt(ini, "tools", "fill_tolerance", t.fillTolerance, 0, 255);
 
+    PixelSettings& px = out.pixel;
+    readInt(ini, "pixel", "new_width", px.newWidth, 1, kMaxPixelCanvasSide);
+    readInt(ini, "pixel", "new_height", px.newHeight, 1, kMaxPixelCanvasSide);
+    readInt(ini, "pixel", "grid_zoom", px.gridZoomPercent, kMinPixelGridZoomPercent, kMaxPixelGridZoomPercent);
+    readBool(ini, "pixel", "pixel_perfect", px.pixelPerfectDefault);
+    readBool(ini, "pixel", "tools_panel", px.showToolsPanel);
+    readBool(ini, "pixel", "layers_panel", px.showLayersPanel);
+    ToolSettings& pt = px.tools;
+    if (const std::string* value = ini.get("pixel", "primary")) {
+        if (const auto parsed = parseColor(*value))
+            pt.primary = *parsed;
+    }
+    if (const std::string* value = ini.get("pixel", "secondary")) {
+        if (const auto parsed = parseColor(*value))
+            pt.secondary = *parsed;
+    }
+    readInt(ini, "pixel", "brush_size", pt.brushSize, ToolSettings::kMinSize, ToolSettings::kMaxPixelSize);
+    readInt(ini, "pixel", "stroke_width", pt.strokeWidth, ToolSettings::kMinSize, ToolSettings::kMaxPixelSize);
+    readBool(ini, "pixel", "square_brush", pt.squareBrush);
+    readEnum(ini, "pixel", "shape_mode", pt.shapeMode, kShapeModeNames);
+    readInt(ini, "pixel", "fill_tolerance", pt.fillTolerance, 0, 255);
+    readBool(ini, "pixel", "fill_global", pt.fillGlobal);
+    pt.pixelPerfect = px.pixelPerfectDefault;
+    pt.antialias = false;
+    pt.eraseToTransparent = true;
+
     out.keymap.load(ini);
 
     readThemeOverrides(ini, out.themeOverrides);
 
     readInt(ini, "ui", "last_page", out.lastPage, 0, kSettingsPageCount - 1);
+    if (const std::string* mode = ini.get("ui", "mode")) {
+        if (const auto parsed = modeFromKey(*mode))
+            out.mode = *parsed;
+    }
     return true;
 }
 
@@ -206,11 +236,28 @@ bool saveSettings(const std::string& path, const Settings& s) {
     ini.set("tools", "shape_mode", kShapeModeNames[static_cast<std::size_t>(t.shapeMode)]);
     ini.set("tools", "fill_tolerance", std::to_string(t.fillTolerance));
 
+    const PixelSettings& px = s.pixel;
+    ini.set("pixel", "new_width", std::to_string(px.newWidth));
+    ini.set("pixel", "new_height", std::to_string(px.newHeight));
+    ini.set("pixel", "grid_zoom", std::to_string(px.gridZoomPercent));
+    setBool(ini, "pixel", "pixel_perfect", px.pixelPerfectDefault);
+    setBool(ini, "pixel", "tools_panel", px.showToolsPanel);
+    setBool(ini, "pixel", "layers_panel", px.showLayersPanel);
+    ini.set("pixel", "primary", formatColor(px.tools.primary));
+    ini.set("pixel", "secondary", formatColor(px.tools.secondary));
+    ini.set("pixel", "brush_size", std::to_string(px.tools.brushSize));
+    ini.set("pixel", "stroke_width", std::to_string(px.tools.strokeWidth));
+    setBool(ini, "pixel", "square_brush", px.tools.squareBrush);
+    ini.set("pixel", "shape_mode", kShapeModeNames[static_cast<std::size_t>(px.tools.shapeMode)]);
+    ini.set("pixel", "fill_tolerance", std::to_string(px.tools.fillTolerance));
+    setBool(ini, "pixel", "fill_global", px.tools.fillGlobal);
+
     s.keymap.save(ini);
 
     writeThemeOverrides(ini, s.themeOverrides);
 
     ini.set("ui", "last_page", std::to_string(s.lastPage));
+    ini.set("ui", "mode", modeKey(s.mode));
 
     const fs::path target = toPath(path);
     fs::path temp = target;

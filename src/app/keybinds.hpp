@@ -28,9 +28,18 @@ const char* tokenFor(ImGuiKey key);
 // key fire again (brush size).
 bool triggered(const Keymap& keymap, Action action, bool repeat = false);
 
+// triggered(), but only for an action that is live while `mode` is shown: Global actions and the ones of that
+// mode's context. This is what keeps one chord from firing the actions of two modes at once.
+bool triggeredIn(const Keymap& keymap, Action action, ModeContext mode, bool repeat = false);
+
 // Menu and tooltip text for the first bound chord of the action, "" when unbound. Ctrl reads Cmd on macOS.
 std::string displayShortcut(const Keymap& keymap, Action action);
 std::string displayChord(const Chord& chord);
+
+// A menu entry whose shortcut text comes from the keymap, so it follows any rebinding. Returns what
+// ImGui::MenuItem returns.
+bool actionMenuItem(const Keymap& keymap, const char* label, Action action, bool* selected = nullptr,
+                    bool enabled = true);
 
 // The settings window sets this while it waits for a new chord so no shortcut fires meanwhile.
 void setCapturing(bool capturing);

@@ -88,12 +88,15 @@ add_library(trace_tools STATIC
 target_include_directories(trace_tools PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(trace_tools PUBLIC trace_core PRIVATE trace_options)
 
-# --- trace_io: image file formats (stb_image / stb_image_write / vendored msf_gif) ------------------
+# --- trace_io: image file formats (stb_image / stb_image_write / vendored msf_gif), project files ------------------
 if(NOT STB_INCLUDE_DIRS)
     message(FATAL_ERROR "stb headers not found; run the configure step through the vcpkg toolchain")
 endif()
 add_library(trace_io STATIC
     src/io/image_io.cpp
+    src/io/file_write.cpp
+    src/io/project_io.cpp
+    src/io/pixel_project.cpp
     src/io/codec_impl.cpp
 )
 target_include_directories(trace_io PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -144,7 +147,15 @@ add_executable(trace
     src/app/app.cpp
     src/app/theme.cpp
     src/app/canvas_view.cpp
+    src/app/texture_mirror.cpp
     src/app/file_session.cpp
+    src/app/paint_file_adapter.cpp
+    src/app/paint_workspace.cpp
+    src/app/pixel_workspace.cpp
+    src/app/pixel_file_adapter.cpp
+    src/app/pixel_panels.cpp
+    src/app/raster_common.cpp
+    src/app/placeholder_workspace.cpp
     src/app/image_dialogs.cpp
     src/app/toasts.cpp
     src/app/pattern_draw.cpp
