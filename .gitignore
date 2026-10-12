@@ -1,0 +1,11 @@
+CLAUDE.md
+CLAUDELOGS.md
+.claude
+
+# Build output
+build/
+out/
+vcpkg_installed/
+.vs/
+*.user
+CMakeUserPresets.json
