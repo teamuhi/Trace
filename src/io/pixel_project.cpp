@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <climits>
+#include <cstdint>
 #include <exception>
 #include <new>
 #include <string>
@@ -11,6 +12,7 @@
 
 #include "core/document.hpp"
 #include "core/i18n.hpp"
+#include "core/palette.hpp"
 #include "io/path_utf8.hpp"
 
 namespace trace {
@@ -67,9 +69,87 @@ bool readBool(const IniFile& ini, const std::string& section, const char* key, b
     return fallback;
 }
 
+constexpr const char* kPalette = "palette";
+
+std::string colorKey(std::size_t index) {
+    return "c" + std::to_string(index);
+}
+
+// "RRGGBB" (an optional leading '#' is tolerated); anything else is refused. The color is always opaque.
+std::optional<Rgba8> parsePaletteColor(std::string_view text) {
+    if (!text.empty() && text.front() == '#')
+        text.remove_prefix(1);
+    if (text.size() != 6)
+        return std::nullopt;
+    std::uint32_t value = 0;
+    for (const char c : text) {
+        unsigned digit = 0;
+        if (c >= '0' && c <= '9')
+            digit = static_cast<unsigned>(c - '0');
+        else if (c >= 'a' && c <= 'f')
+            digit = static_cast<unsigned>(c - 'a') + 10;
+        else if (c >= 'A' && c <= 'F')
+            digit = static_cast<unsigned>(c - 'A') + 10;
+        else
+            return std::nullopt;
+        value = value << 4 | digit;
+    }
+    return Rgba8{static_cast<std::uint8_t>(value >> 16), static_cast<std::uint8_t>(value >> 8),
+                 static_cast<std::uint8_t>(value), 255};
+}
+
+std::string formatPaletteColor(Rgba8 color) {
+    static constexpr char kDigits[] = "0123456789ABCDEF";
+    std::string text(6, '0');
+    const std::uint8_t channels[3] = {color.r, color.g, color.b};
+    for (std::size_t i = 0; i < 3; ++i) {
+        text[i * 2] = kDigits[channels[i] >> 4];
+        text[i * 2 + 1] = kDigits[channels[i] & 0xF];
+    }
+    return text;
+}
+
+void writePalette(IniFile& meta, const Palette& palette) {
+    const std::size_t count = std::min(palette.colors.size(), kMaxPaletteColors);
+    const std::string name = cleanPaletteName(palette.name);
+    if (!name.empty())
+        meta.set(kPalette, "name", name);
+    meta.set(kPalette, "count", std::to_string(count)); // also marks an empty palette as intentional
+    for (std::size_t i = 0; i < count; ++i)
+        meta.set(kPalette, colorKey(i), formatPaletteColor(palette.colors[i]));
+}
+
+// Nothing when there is no [palette] section, or when it lists no usable color without saying count=0 (then it
+// is damaged, not an empty palette). Never refuses the project: the caller just ends up without a palette.
+std::optional<Palette> readPalette(const IniFile& ini) {
+    if (!ini.section(kPalette))
+        return std::nullopt;
+    std::size_t limit = kMaxPaletteColors;
+    bool explicitEmpty = false;
+    if (const std::string* value = ini.get(kPalette, "count")) {
+        if (const std::optional<int> parsed = parseInt(*value, 0, INT_MAX)) {
+            limit = std::min(static_cast<std::size_t>(*parsed), kMaxPaletteColors);
+            explicitEmpty = *parsed == 0;
+        }
+    }
+
+    Palette palette;
+    if (const std::string* name = ini.get(kPalette, "name"))
+        palette.name = cleanPaletteName(*name);
+    for (std::size_t i = 0; i < limit; ++i) {
+        if (const std::string* value = ini.get(kPalette, colorKey(i))) {
+            if (const std::optional<Rgba8> color = parsePaletteColor(*value))
+                palette.colors.push_back(*color);
+        }
+    }
+    if (palette.colors.empty() && !explicitEmpty)
+        return std::nullopt;
+    return palette;
+}
+
 } // namespace
 
-ProjectData pixelProjectData(const Document& doc) {
+ProjectData pixelProjectData(const Document& doc, const Palette* palette) {
     ProjectData data;
     data.kind = kProjectPixel;
     const Layout& layout = doc.layout();
@@ -104,12 +184,14 @@ ProjectData pixelProjectData(const Document& doc) {
             data.images.push_back(cel);
         }
     }
+    if (palette)
+        writePalette(meta, *palette);
     return data;
 }
 
-PixelProjectLoad pixelProjectToCels(ProjectData data, const std::string& name) {
+PixelProjectLoad pixelProjectToCels(ProjectData data, const std::string& name, std::uint32_t kind, int maxSide) {
     try {
-        if (data.kind != kProjectPixel)
+        if (data.kind != kind)
             return failure(trf(Str::IoPixelNotPixel, {name}));
         const IniFile& ini = data.meta;
         if (!ini.section(kDoc))
@@ -146,9 +228,9 @@ PixelProjectLoad pixelProjectToCels(ProjectData data, const std::string& name) {
             width = first->width();
             height = first->height();
         }
-        if (width > kMaxPixelCanvasSide || height > kMaxPixelCanvasSide)
+        if (width > maxSide || height > maxSide)
             return failure(trf(Str::IoPixelTooBig, {name, std::to_string(width), std::to_string(height),
-                                                    std::to_string(kMaxPixelCanvasSide)}));
+                                                    std::to_string(maxSide)}));
         if (!fitsDocumentBudget(width, height, layerCount, frameCount))
             return failure(trf(Str::IoPixelTooMuch, {name, std::to_string(layerCount), std::to_string(frameCount),
                                                      std::to_string(width), std::to_string(height)}));
@@ -207,6 +289,7 @@ PixelProjectLoad pixelProjectToCels(ProjectData data, const std::string& name) {
             }
         }
         result.store = std::move(store);
+        result.palette = readPalette(ini); // a damaged palette is dropped, never an error
         return result;
     } catch (const std::bad_alloc&) {
         return failure(trf(Str::IoMemoryOpenNamed, {name}));
@@ -215,9 +298,9 @@ PixelProjectLoad pixelProjectToCels(ProjectData data, const std::string& name) {
     }
 }
 
-std::string savePixelProject(const std::filesystem::path& path, const Document& doc) {
+std::string savePixelProject(const std::filesystem::path& path, const Document& doc, const Palette* palette) {
     try {
-        return saveProject(path, pixelProjectData(doc));
+        return saveProject(path, pixelProjectData(doc, palette));
     } catch (const std::bad_alloc&) {
         return trf(Str::IoMemorySave, {utf8FromPath(path.filename())});
     } catch (const std::exception& e) {

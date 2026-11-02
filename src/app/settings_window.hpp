@@ -27,6 +27,13 @@ public:
     bool draw(Settings& settings, Toolbox& toolbox, const std::string& settingsPath, NativeDialogs& dialogs,
               LanguageManager& languages);
 
+    // True once after the Reset layout button was pressed; the App then resets the window layout of every mode.
+    bool takeResetLayoutRequest() noexcept {
+        const bool pending = resetLayoutRequested_;
+        resetLayoutRequested_ = false;
+        return pending;
+    }
+
 private:
     struct SlotRef {
         Action action;
@@ -39,11 +46,13 @@ private:
     };
 
     bool drawCategories(Settings& settings, float footer);
+    void drawPageHeader(int page);
     bool drawGeneral(Settings& settings);
     bool drawTheme(Settings& settings);
     bool drawView(Settings& settings);
     bool drawTools(Settings& settings, Toolbox& toolbox);
     bool drawPixelArt(Settings& settings);
+    bool drawFlowchart(Settings& settings);
     void drawScripts();
     bool drawKeybinds(Settings& settings);
     void drawAbout(const std::string& settingsPath);
@@ -60,6 +69,7 @@ private:
     bool wasOpen_ = false;
     bool open_ = false;
     bool focusRequested_ = false;
+    bool resetLayoutRequested_ = false;
 
     std::optional<SlotRef> capture_;
     std::optional<Conflict> conflict_;

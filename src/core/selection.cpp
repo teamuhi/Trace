@@ -30,6 +30,12 @@ void Selection::clear() noexcept {
     base_ = Image();
 }
 
+void Selection::shiftBy(int dx, int dy) noexcept {
+    if (floating_ || !active())
+        return;
+    rect_ = IRect{rect_.x0 + dx, rect_.y0 + dy, rect_.x1 + dx, rect_.y1 + dy};
+}
+
 void Selection::setRect(const IRect& rect) noexcept {
     if (floating_)
         return;

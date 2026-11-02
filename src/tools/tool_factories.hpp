@@ -11,5 +11,6 @@ std::unique_ptr<Tool> createFreehandTool(ToolId id); // Pencil, Brush, Eraser
 std::unique_ptr<Tool> createShapeTool(ToolId id);    // Line, Rectangle, Ellipse
 std::unique_ptr<Tool> createClickTool(ToolId id);    // Fill, Picker
 std::unique_ptr<Tool> createSelectTool();            // Select
+std::unique_ptr<Tool> createTextTool();              // Text
 
 } // namespace trace

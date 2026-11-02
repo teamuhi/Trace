@@ -1216,3 +1216,275 @@ TEST_CASE("Out-of-range accessors are harmless") {
     CHECK(doc.cel(3, 3).empty());
     CHECK(doc.celId(3, 3) == kNoCel);
 }
+
+// --- replaceColor --------------------------------------------------------------------------------------
+
+namespace {
+
+// 4 x 4, two layers by two frames. Red at (0,0) in layer 0 and at (1,1) in layer 1 of both frames; blue at (2,2)
+// in layer 1 of frame 1 only. Active cel is (layer 1, frame 1).
+Document replaceFixture() {
+    Document doc = clearDoc(4, 4);
+    paint(doc, IRect{0, 0, 1, 1}, kRed);
+    doc.addLayer();
+    paint(doc, IRect{1, 1, 2, 2}, kRed);
+    doc.addFrame(Document::FrameFill::Duplicate);
+    paint(doc, IRect{2, 2, 3, 3}, kBlue);
+    return doc;
+}
+
+} // namespace
+
+TEST_CASE("replaceColor with Cel scope changes only the active cel") {
+    Document doc = replaceFixture();
+    REQUIRE(doc.setActive(0, 0) == Result::Applied);
+    const Snapshot before = snap(doc);
+    const std::size_t steps = doc.history().undoCount();
+
+    REQUIRE(doc.replaceColor(kRed, kGreen, ReplaceScope::Cel) == Result::Applied);
+    CHECK(doc.history().undoCount() == steps + 1);
+    CHECK(doc.cel(0, 0).get(0, 0) == kGreen);
+    CHECK(doc.image().get(0, 0) == kGreen);
+    CHECK(doc.cel(0, 1).get(0, 0) == kRed);
+    CHECK(doc.cel(1, 0).get(1, 1) == kRed);
+    CHECK(doc.cel(1, 1).get(1, 1) == kRed);
+    CHECK(doc.cel(1, 1).get(2, 2) == kBlue);
+    CHECK(doc.activeLayer() == 0);
+    CHECK(doc.activeFrame() == 0);
+
+    REQUIRE(doc.undo());
+    CHECK(snap(doc) == before);
+}
+
+TEST_CASE("replaceColor with Layer scope covers the active layer in every frame") {
+    Document doc = replaceFixture(); // active (1, 1)
+    REQUIRE(doc.replaceColor(kRed, kGreen, ReplaceScope::Layer) == Result::Applied);
+    CHECK(doc.cel(1, 0).get(1, 1) == kGreen);
+    CHECK(doc.cel(1, 1).get(1, 1) == kGreen);
+    CHECK(doc.cel(1, 1).get(2, 2) == kBlue);
+    CHECK(doc.cel(0, 0).get(0, 0) == kRed);
+    CHECK(doc.cel(0, 1).get(0, 0) == kRed);
+    CHECK(doc.activeLayer() == 1);
+    CHECK(doc.activeFrame() == 1);
+}
+
+TEST_CASE("replaceColor with All scope covers every layer and frame, and only exact matches") {
+    Document doc = replaceFixture();
+    const Rgba8 almostRed{255, 0, 0, 254};
+    doc.image().set(3, 3, almostRed);
+    doc.markDirty(IRect{3, 3, 4, 4});
+    doc.commit();
+
+    REQUIRE(doc.replaceColor(kRed, kGreen, ReplaceScope::All) == Result::Applied);
+    CHECK(doc.cel(0, 0).get(0, 0) == kGreen);
+    CHECK(doc.cel(0, 1).get(0, 0) == kGreen);
+    CHECK(doc.cel(1, 0).get(1, 1) == kGreen);
+    CHECK(doc.cel(1, 1).get(1, 1) == kGreen);
+    CHECK(doc.cel(1, 1).get(2, 2) == kBlue);
+    CHECK(doc.cel(1, 1).get(3, 3) == almostRed); // alpha differs: no match
+    CHECK(doc.cel(0, 0).get(1, 1) == kClear);
+}
+
+TEST_CASE("replaceColor can replace and match transparent pixels") {
+    Document doc = replaceFixture();
+    REQUIRE(doc.replaceColor(kClear, kWhite, ReplaceScope::Cel) == Result::Applied);
+    CHECK(doc.image().get(0, 0) == kWhite);
+    CHECK(doc.image().get(1, 1) == kRed);
+    CHECK(doc.cel(0, 0).get(3, 3) == kClear);
+}
+
+TEST_CASE("replaceColor skips locked layers") {
+    Document doc = replaceFixture();
+    LayerInfo p = propsOf(doc, 0);
+    p.locked = true;
+    REQUIRE(doc.setLayerProps(0, p) == Result::Applied);
+
+    REQUIRE(doc.replaceColor(kRed, kGreen, ReplaceScope::All) == Result::Applied);
+    CHECK(doc.cel(0, 0).get(0, 0) == kRed);
+    CHECK(doc.cel(0, 1).get(0, 0) == kRed);
+    CHECK(doc.cel(1, 0).get(1, 1) == kGreen);
+    CHECK(doc.cel(1, 1).get(1, 1) == kGreen);
+
+    // Scopes that only reach the locked layer have nothing to do.
+    REQUIRE(doc.setActive(0, 0) == Result::Applied);
+    const std::size_t steps = doc.history().undoCount();
+    CHECK(doc.replaceColor(kRed, kBlue, ReplaceScope::Cel) == Result::Nothing);
+    CHECK(doc.replaceColor(kRed, kBlue, ReplaceScope::Layer) == Result::Nothing);
+    CHECK(doc.history().undoCount() == steps);
+    CHECK(doc.cel(0, 0).get(0, 0) == kRed);
+}
+
+TEST_CASE("replaceColor with nothing to do leaves the document and history alone") {
+    Document doc = replaceFixture();
+    const Snapshot before = snap(doc);
+    const std::size_t steps = doc.history().undoCount();
+    const CelId active = doc.activeCel();
+
+    CHECK(doc.replaceColor(kRed, kRed, ReplaceScope::All) == Result::Nothing);
+    CHECK(doc.replaceColor(kWhite, kGreen, ReplaceScope::All) == Result::Nothing); // no such color
+    CHECK(doc.replaceColor(kGreen, kBlue, ReplaceScope::Cel) == Result::Nothing);  // not in the active cel
+    CHECK(doc.history().undoCount() == steps);
+    CHECK(snap(doc) == before);
+    CHECK(doc.activeCel() == active);
+}
+
+TEST_CASE("replaceColor is one undo step, and undo and redo restore exact pixels and the position") {
+    Document doc = replaceFixture();
+    REQUIRE(doc.setActive(1, 0) == Result::Applied);
+    const Snapshot before = snap(doc);
+    const std::size_t steps = doc.history().undoCount();
+
+    REQUIRE(doc.replaceColor(kRed, kGreen, ReplaceScope::All) == Result::Applied);
+    const Snapshot after = snap(doc);
+    CHECK(after != before);
+    CHECK(doc.history().undoCount() == steps + 1);
+
+    REQUIRE(doc.undo());
+    CHECK(snap(doc) == before);
+    CHECK(doc.activeLayer() == 1);
+    CHECK(doc.activeFrame() == 0);
+    CHECK(doc.image().get(1, 1) == kRed);
+
+    REQUIRE(doc.redo());
+    CHECK(snap(doc) == after);
+    CHECK(doc.image().get(1, 1) == kGreen);
+    CHECK(doc.activeLayer() == 1);
+    CHECK(doc.activeFrame() == 0);
+
+    // A second replace after undo forks the timeline like any other edit.
+    REQUIRE(doc.undo());
+    REQUIRE(doc.replaceColor(kRed, kBlue, ReplaceScope::Cel) == Result::Applied);
+    CHECK_FALSE(doc.canRedo());
+    CHECK(doc.image().get(1, 1) == kBlue);
+    REQUIRE(doc.undo());
+    CHECK(snap(doc) == before);
+}
+
+TEST_CASE("replaceColor records pending edits first, as its own earlier step") {
+    Document doc = replaceFixture();
+    paint(doc, IRect{3, 0, 4, 1}, kRed, false); // drawn but not committed
+    REQUIRE(doc.replaceColor(kRed, kGreen, ReplaceScope::Cel) == Result::Applied);
+    CHECK(doc.image().get(3, 0) == kGreen); // the pending pixel was included
+
+    REQUIRE(doc.undo()); // only the replace goes
+    CHECK(doc.image().get(3, 0) == kRed);
+    CHECK(doc.image().get(1, 1) == kRed);
+    REQUIRE(doc.undo()); // then the stroke
+    CHECK(doc.image().get(3, 0) == kClear);
+}
+
+TEST_CASE("replaceColor flattens a floating selection into its cel first") {
+    Document doc = replaceFixture();
+    doc.selectRect(IRect{1, 1, 2, 2});
+    REQUIRE(doc.liftSelection(kClear));
+    doc.moveSelectionTo(3, 0);
+    REQUIRE(doc.selection().floating());
+
+    REQUIRE(doc.replaceColor(kRed, kGreen, ReplaceScope::Cel) == Result::Applied);
+    CHECK_FALSE(doc.selection().floating());
+    CHECK(doc.image().get(3, 0) == kGreen);
+    CHECK(doc.image().get(1, 1) == kClear);
+}
+
+TEST_CASE("replaceColor redraws the canvas and invalidates caches") {
+    Document doc = replaceFixture();
+    doc.takeDirty();
+    const std::uint64_t revision = doc.revision();
+    REQUIRE(doc.replaceColor(kRed, kGreen, ReplaceScope::All) == Result::Applied);
+    CHECK(doc.revision() > revision);
+    const IRect dirty = doc.takeDirty();
+    CHECK(dirty.x1 - dirty.x0 == 4);
+    CHECK(dirty.y1 - dirty.y0 == 4);
+    CHECK(doc.displayImage().get(1, 1) == kGreen); // the composite of the shown frame is current
+    CHECK(doc.displayImage().get(0, 0) == kGreen);
+
+    const std::uint64_t afterApply = doc.revision();
+    REQUIRE(doc.undo());
+    CHECK(doc.revision() > afterApply);
+    CHECK(doc.displayImage().get(1, 1) == kRed);
+}
+
+TEST_CASE("replaceColor on a one-cel document works like a plain edit") {
+    Document doc(3, 3, kRed);
+    REQUIRE(doc.replaceColor(kRed, kBlue, ReplaceScope::Cel) == Result::Applied);
+    for (const Rgba8& p : doc.image().pixels())
+        CHECK(p == kBlue);
+    CHECK(&doc.displayImage() == &doc.image());
+    REQUIRE(doc.undo());
+    for (const Rgba8& p : doc.image().pixels())
+        CHECK(p == kRed);
+    CHECK(doc.replaceColor(kRed, kRed, ReplaceScope::All) == Result::Nothing);
+}
+
+TEST_CASE("importFrames puts a picture sequence on a new layer, one frame each, as one undo step") {
+    Document doc(8, 8, Rgba8{});
+    std::vector<Image> pictures;
+    pictures.emplace_back(4, 4, kRed);
+    pictures.emplace_back(4, 4, kGreen);
+    pictures.emplace_back(4, 4, kBlue);
+    const std::vector<int> durations = {50, 70, 90};
+
+    REQUIRE(doc.importFrames(pictures, durations, 2, 2, "anim") == Result::Applied);
+    CHECK(doc.layerCount() == 2);
+    CHECK(doc.activeLayer() == 1);
+    CHECK(doc.activeFrame() == 0);
+    CHECK(doc.frameCount() == 3);
+    CHECK(doc.layer(1).name == "anim");
+    CHECK(doc.cel(1, 0).get(2, 2) == kRed);
+    CHECK(doc.cel(1, 1).get(5, 5) == kGreen);
+    CHECK(doc.cel(1, 2).get(1, 1).a == 0); // outside the 4 x 4 picture
+    CHECK(doc.cel(0, 2).get(2, 2).a == 0); // the base layer stays blank in the added frames
+    CHECK(doc.frame(0).durationMs == kDefaultFrameMs); // an existing frame keeps its duration
+    CHECK(doc.frame(1).durationMs == 70);
+    CHECK(doc.frame(2).durationMs == 90);
+
+    REQUIRE(doc.undo());
+    CHECK(doc.layerCount() == 1);
+    CHECK(doc.frameCount() == 1);
+}
+
+TEST_CASE("importFrames clips to the canvas and refuses what does not fit") {
+    Document doc(4, 4, Rgba8{});
+    std::vector<Image> pictures;
+    pictures.emplace_back(6, 6, kRed);
+    const std::vector<int> durations = {100};
+    REQUIRE(doc.importFrames(pictures, durations, -1, -1) == Result::Applied);
+    CHECK(doc.cel(1, 0).get(0, 0) == kRed);
+    CHECK(doc.cel(1, 0).get(3, 3) == kRed);
+
+    CHECK(doc.importFrames({}, {}, 0, 0) == Result::Nothing);
+
+    std::vector<Image> many(static_cast<std::size_t>(kMaxFrames) + 1, Image(1, 1, kRed));
+    CHECK(doc.importFrames(many, {}, 0, 0) == Result::NoMemory);
+    CHECK(doc.layerCount() == 2);
+}
+
+TEST_CASE("On a whiteboard the eraser clears to transparency and a fill must be a closed area") {
+    Document doc(12, 12, Rgba8{});
+    doc.setEndless(true);
+    Toolbox tb;
+    tb.settings().primary = kRed;
+    tb.settings().antialias = false;
+    tb.settings().fillTolerance = 0;
+    tb.settings().fillGlobal = false;
+    CHECK(clearsToTransparency(tb.settings(), doc));
+
+    // A ring of ink with an empty middle.
+    for (int i = 3; i <= 8; ++i)
+        for (const IRect r : {IRect{i, 3, i + 1, 4}, IRect{i, 8, i + 1, 9}, IRect{3, i, 4, i + 1}, IRect{8, i, 9, i + 1}}) {
+            doc.image().set(r.x0, r.y0, kRed);
+            doc.markDirty(r);
+        }
+    doc.commit();
+
+    tb.select(ToolId::Fill);
+    tb.press(doc, at(0.5f, 0.5f)); // outside the ring: the area leaks to the edge of the board
+    CHECK(tb.lastRefusal() == Toolbox::Refusal::FillUnbounded);
+    CHECK_FALSE(tb.gestureActive());
+    CHECK(doc.image().get(0, 0).a == 0);
+
+    tb.press(doc, at(5.5f, 5.5f)); // inside the ring: closed
+    CHECK(tb.lastRefusal() == Toolbox::Refusal::None);
+    tb.release(doc, at(5.5f, 5.5f));
+    CHECK(doc.image().get(5, 5) == kRed);
+}

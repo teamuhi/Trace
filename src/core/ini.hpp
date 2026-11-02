@@ -2,7 +2,9 @@
 
 #include <optional>
 #include <string>
+#include <functional>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace trace {
@@ -40,7 +42,14 @@ public:
 private:
     Section& sectionRef(std::string_view name);
 
+    struct NameHash {
+        using is_transparent = void;
+        std::size_t operator()(std::string_view name) const noexcept { return std::hash<std::string_view>{}(name); }
+    };
+
     std::vector<Section> sections_;
+    // Section name -> position in sections_, so a file with many sections (a big flowchart) is not quadratic.
+    std::unordered_map<std::string, std::size_t, NameHash, std::equal_to<>> index_;
 };
 
 // Typed readers. Each returns nullopt for malformed or out-of-range input so the caller keeps its default.

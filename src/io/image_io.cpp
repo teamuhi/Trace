@@ -2,6 +2,7 @@
 
 #include "core/i18n.hpp"
 #include "io/file_write.hpp"
+#include "io/image_extra.hpp"
 #include "io/path_utf8.hpp"
 
 #include <stb_image.h>
@@ -126,23 +127,118 @@ LoadResult decodeBytes(const std::vector<unsigned char>& bytes, const std::strin
     return LoadResult{std::move(image), {}, countGifFrames(bytes)};
 }
 
-LoadResult decode(const fs::path& path) {
+// The whole file, or a message fit to show the user in `error`.
+std::vector<unsigned char> readFileBytes(const fs::path& path, std::string& error) {
     std::ifstream file(path, std::ios::binary | std::ios::ate);
-    if (!file)
-        return failure(trf(Str::IoCannotOpen, {describe(path)}));
-
+    if (!file) {
+        error = trf(Str::IoCannotOpen, {describe(path)});
+        return {};
+    }
     const std::streamoff size = file.tellg();
-    if (size <= 0)
-        return failure(trf(Str::IoEmpty, {describe(path)}));
-    if (static_cast<std::uintmax_t>(size) > kMaxImageFileBytes)
-        return failure(trf(Str::IoTooLargeToOpen, {describe(path)}));
-
+    if (size <= 0) {
+        error = trf(Str::IoEmpty, {describe(path)});
+        return {};
+    }
+    if (static_cast<std::uintmax_t>(size) > kMaxImageFileBytes) {
+        error = trf(Str::IoTooLargeToOpen, {describe(path)});
+        return {};
+    }
     std::vector<unsigned char> bytes(static_cast<std::size_t>(size));
     file.seekg(0);
-    if (!file.read(reinterpret_cast<char*>(bytes.data()), size))
-        return failure(trf(Str::IoCannotRead, {describe(path)}));
+    if (!file.read(reinterpret_cast<char*>(bytes.data()), size)) {
+        error = trf(Str::IoCannotRead, {describe(path)});
+        return {};
+    }
+    return bytes;
+}
 
+LoadResult decode(const fs::path& path) {
+    std::string error;
+    const std::vector<unsigned char> bytes = readFileBytes(path, error);
+    if (!error.empty())
+        return failure(std::move(error));
     return decodeBytes(bytes, describe(path));
+}
+
+// The decoder keeps every frame of a GIF in one buffer; more pixels than this and only the first frame is decoded.
+constexpr std::size_t kMaxGifDecodePixels = 96u * 1024u * 1024u;
+
+AnimationLoadResult animationFailure(std::string message) {
+    AnimationLoadResult out;
+    out.error = std::move(message);
+    return out;
+}
+
+AnimationLoadResult singleFrame(const std::vector<unsigned char>& bytes, const std::string& name, int totalFrames) {
+    LoadResult one = decodeBytes(bytes, name);
+    if (!one.image)
+        return animationFailure(std::move(one.error));
+    AnimationLoadResult out;
+    out.frames.push_back(std::move(*one.image));
+    out.delaysMs.push_back(kDefaultFrameDelayMs);
+    out.totalFrames = totalFrames;
+    return out;
+}
+
+AnimationLoadResult decodeAnimationBytes(const std::vector<unsigned char>& bytes, const std::string& name,
+                                         std::size_t maxFrames, std::size_t maxPixels) {
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    if (!stbi_info_from_memory(bytes.data(), static_cast<int>(bytes.size()), &width, &height, &channels))
+        return animationFailure(trf(Str::IoUnsupported, {name}));
+    if (width < 1 || height < 1 || width > kMaxImageDimension || height > kMaxImageDimension)
+        return animationFailure(trf(Str::IoTooLarge, {name, std::to_string(kMaxImageDimension)}));
+
+    const int total = countGifFrames(bytes);
+    if (total <= 1 || maxFrames < 2)
+        return singleFrame(bytes, name, total);
+
+    const std::size_t area = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    const std::size_t frames = std::min<std::size_t>(static_cast<std::size_t>(total), maxFrames);
+    // The decoder allocates all `total` frames at once, so that is what must stay inside the limit.
+    if (area * static_cast<std::size_t>(total) > kMaxGifDecodePixels || area > maxPixels)
+        return singleFrame(bytes, name, total);
+
+    int* delays = nullptr;
+    int w = 0;
+    int h = 0;
+    int z = 0;
+    int c = 0;
+    unsigned char* pixels = stbi_load_gif_from_memory(bytes.data(), static_cast<int>(bytes.size()), &delays, &w, &h, &z, &c, 4);
+    if (!pixels) {
+        const char* reason = stbi_failure_reason();
+        return animationFailure(reason ? trf(Str::IoDecodeReason, {name, reason}) : trf(Str::IoDecode, {name}));
+    }
+    struct Free {
+        unsigned char* p;
+        int* d;
+        ~Free() {
+            stbi_image_free(p);
+            if (d)
+                stbi_image_free(d);
+        }
+    } release{pixels, delays};
+    if (z < 1 || w != width || h != height)
+        return singleFrame(bytes, name, total); // the file lied about its frames or size; trust the first frame
+
+    // How many frames fit the pixel limit as well.
+    const std::size_t fit = std::min(frames, maxPixels / area);
+    if (fit < 1)
+        return singleFrame(bytes, name, total);
+    const std::size_t take = std::min<std::size_t>(fit, static_cast<std::size_t>(z));
+
+    AnimationLoadResult out;
+    out.totalFrames = total;
+    out.frames.reserve(take);
+    for (std::size_t i = 0; i < take; ++i) {
+        Image image(w, h);
+        std::memcpy(image.pixels().data(), pixels + i * area * 4u, area * 4u);
+        out.frames.push_back(std::move(image));
+        const int ms = delays ? delays[i] : 0;
+        out.delaysMs.push_back(ms > 0 ? ms : kDefaultFrameDelayMs);
+    }
+    return out;
 }
 
 // --- saving ----------------------------------------------------------------------------------------
@@ -211,6 +307,19 @@ bool encode(std::ostream& out, const Image& image, ImageFormat format, const Sav
         msf_gif_free(result);
         return ok;
     }
+    case ImageFormat::Tiff:
+    case ImageFormat::Ico:
+    case ImageFormat::Qoi:
+    case ImageFormat::Ppm:
+    case ImageFormat::Svg:
+    case ImageFormat::Pdf:
+    case ImageFormat::Docx: {
+        const std::vector<std::uint8_t> bytes = encodeExtra(image, format, options);
+        if (bytes.empty())
+            return false;
+        out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        return out.good();
+    }
     }
     return false;
 }
@@ -221,14 +330,28 @@ std::optional<ImageFormat> formatFromPath(const fs::path& path) {
     const std::string ext = lowercaseExtension(path);
     if (ext == ".png")
         return ImageFormat::Png;
-    if (ext == ".jpg" || ext == ".jpeg")
+    if (ext == ".jpg" || ext == ".jpeg" || ext == ".jpe" || ext == ".jfif")
         return ImageFormat::Jpeg;
-    if (ext == ".bmp")
+    if (ext == ".bmp" || ext == ".dib")
         return ImageFormat::Bmp;
     if (ext == ".tga")
         return ImageFormat::Tga;
     if (ext == ".gif")
         return ImageFormat::Gif;
+    if (ext == ".tif" || ext == ".tiff")
+        return ImageFormat::Tiff;
+    if (ext == ".ico")
+        return ImageFormat::Ico;
+    if (ext == ".qoi")
+        return ImageFormat::Qoi;
+    if (ext == ".ppm")
+        return ImageFormat::Ppm;
+    if (ext == ".svg")
+        return ImageFormat::Svg;
+    if (ext == ".pdf")
+        return ImageFormat::Pdf;
+    if (ext == ".docx")
+        return ImageFormat::Docx;
     return std::nullopt;
 }
 
@@ -244,6 +367,20 @@ const char* formatName(ImageFormat format) {
         return "TGA";
     case ImageFormat::Gif:
         return "GIF";
+    case ImageFormat::Tiff:
+        return "TIFF";
+    case ImageFormat::Ico:
+        return "ICO";
+    case ImageFormat::Qoi:
+        return "QOI";
+    case ImageFormat::Ppm:
+        return "PPM";
+    case ImageFormat::Svg:
+        return "SVG";
+    case ImageFormat::Pdf:
+        return "PDF";
+    case ImageFormat::Docx:
+        return "DOCX";
     }
     return "";
 }
@@ -260,12 +397,26 @@ const char* defaultExtension(ImageFormat format) {
         return "tga";
     case ImageFormat::Gif:
         return "gif";
+    case ImageFormat::Tiff:
+        return "tiff";
+    case ImageFormat::Ico:
+        return "ico";
+    case ImageFormat::Qoi:
+        return "qoi";
+    case ImageFormat::Ppm:
+        return "ppm";
+    case ImageFormat::Svg:
+        return "svg";
+    case ImageFormat::Pdf:
+        return "pdf";
+    case ImageFormat::Docx:
+        return "docx";
     }
     return "";
 }
 
 bool formatSupportsAlpha(ImageFormat format) {
-    return format != ImageFormat::Jpeg;
+    return format != ImageFormat::Jpeg && format != ImageFormat::Ppm;
 }
 
 SaveTarget resolveSaveTarget(const fs::path& chosen, ImageFormat fallback) {
@@ -298,6 +449,31 @@ std::vector<unsigned char> encodeImage(const Image& image, ImageFormat format, c
         return std::vector<unsigned char>(text.begin(), text.end());
     } catch (const std::exception&) {
         return {};
+    }
+}
+
+AnimationLoadResult decodeAnimation(const std::vector<unsigned char>& bytes, const std::string& name, std::size_t maxFrames,
+                                    std::size_t maxPixels) {
+    try {
+        return decodeAnimationBytes(bytes, name, maxFrames, maxPixels);
+    } catch (const std::bad_alloc&) {
+        return animationFailure(trf(Str::IoMemoryOpenNamed, {name}));
+    } catch (const std::exception& e) {
+        return animationFailure(trf(Str::IoCannotOpenNamed, {name, e.what()}));
+    }
+}
+
+AnimationLoadResult loadAnimation(const fs::path& path, std::size_t maxFrames, std::size_t maxPixels) {
+    try {
+        std::string error;
+        const std::vector<unsigned char> bytes = readFileBytes(path, error);
+        if (!error.empty())
+            return animationFailure(std::move(error));
+        return decodeAnimationBytes(bytes, describe(path), maxFrames, maxPixels);
+    } catch (const std::bad_alloc&) {
+        return animationFailure(trf(Str::IoMemoryOpen, {describe(path)}));
+    } catch (const std::exception& e) {
+        return animationFailure(trf(Str::IoCannotOpenReason, {describe(path), e.what()}));
     }
 }
 

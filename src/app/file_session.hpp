@@ -48,7 +48,8 @@ public:
     void newDocumentNow();
 
     // Each of these may first ask what to do with unsaved changes. They do nothing while busy().
-    void requestNew();
+    // `variant` picks a kind of blank document (FileAdapter::newBlankVariant); 0 is the usual one.
+    void requestNew(int variant = 0);
     void requestOpen();
     void requestOpenPath(const std::filesystem::path& path);
     void requestSave();
@@ -95,6 +96,7 @@ private:
     struct Followup {
         enum class Kind { None, New, OpenPath, Exit } kind = Kind::None;
         std::filesystem::path path;
+        int variant = 0; // New only: which kind of blank document (FileAdapter::newBlankVariant)
     };
 
     struct DialogResult;
@@ -104,7 +106,7 @@ private:
     void guard(Followup followup);
     void saveThen(Followup followup);
 
-    void doNew();
+    void doNew(int variant = 0);
     void doOpen(const std::filesystem::path& path);
     void showOpenDialog();
     void showSaveDialog();
@@ -112,6 +114,8 @@ private:
     void continueSave(const Target& target);
     void finishSave(const Target& target, int quality);
     bool writeFile(const std::filesystem::path& path, int format, int quality);
+    // Whether `format` is an export-only copy of the document (see FileFormat::exportOnly).
+    bool isExport(int format) const;
     Target resolveTarget(const std::filesystem::path& chosen, int fallbackFormat) const;
 
     bool canSaveInPlace() const noexcept { return !path_.empty() && format_ && !lockInPlace_; }
@@ -142,7 +146,6 @@ private:
     std::string message_;
     bool messageIsError_ = false;
     bool exitApproved_ = false;
-    bool dropConsumed_ = false; // the first file of the current drop has been taken
 };
 
 } // namespace trace

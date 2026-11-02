@@ -15,6 +15,9 @@
 #include <utility>
 #include <vector>
 
+#include "app/icon_widgets.hpp"
+#include "app/keybinds.hpp"
+#include "app/panel_ui.hpp"
 #include "app/sampled_image.hpp"
 #include "app/theme.hpp"
 #include "app/toasts.hpp"
@@ -85,17 +88,20 @@ void drawChecker(ImDrawList* dl, ImVec2 min, ImVec2 max, float cell) {
     }
 }
 
+// The icon-only toolbar under the properties card; the tooltip names the command.
 struct Button {
+    const char* id;
     LayerCommand command;
-    Str label;
+    Icon icon;
     Str tip;
 };
 constexpr Button kButtons[] = {
-    {LayerCommand::New, Str::LayerBtnNew, Str::MenuNewLayer},
-    {LayerCommand::Duplicate, Str::LayerBtnDuplicate, Str::MenuDuplicateLayer},
-    {LayerCommand::Delete, Str::LayerBtnDelete, Str::MenuDeleteLayer},
-    {LayerCommand::MergeDown, Str::LayerBtnMerge, Str::MenuMergeDown},
+    {"##new", LayerCommand::New, Icon::AddLayer, Str::MenuNewLayer},
+    {"##duplicate", LayerCommand::Duplicate, Icon::Duplicate, Str::MenuDuplicateLayer},
+    {"##delete", LayerCommand::Delete, Icon::Delete, Str::MenuDeleteLayer},
+    {"##merge", LayerCommand::MergeDown, Icon::Merge, Str::MenuMergeDown},
 };
+constexpr int kButtonCount = static_cast<int>(sizeof(kButtons) / sizeof(kButtons[0]));
 
 // What the user did this frame. Collected while the rows are drawn and applied afterwards, because applying
 // one changes the layer list the rows are being drawn from.
@@ -114,6 +120,29 @@ struct Op {
 
 } // namespace
 
+void drawThumbnail(ImDrawList* dl, TextureMirror& mirror, ImVec2 boxMin, float box) {
+    const ThemeTokens& t = tokens();
+    SDL_Texture* texture = mirror.texture();
+    if (!texture) {
+        dl->AddRect(boxMin, ImVec2(boxMin.x + box, boxMin.y + box), colorOf(t.canvasBorder));
+        return;
+    }
+    const float w = static_cast<float>(mirror.width());
+    const float h = static_cast<float>(mirror.height());
+    const float scale = std::min(box / w, box / h);
+    const float dw = std::max(1.0f, std::floor(w * scale));
+    const float dh = std::max(1.0f, std::floor(h * scale));
+    const ImVec2 a(std::round(boxMin.x + (box - dw) * 0.5f), std::round(boxMin.y + (box - dh) * 0.5f));
+    const ImVec2 b(a.x + dw, a.y + dh);
+    drawChecker(dl, a, b, std::max(2.0f, std::round(box / 8.0f)));
+    // Enlarged previews keep hard pixels; reduced ones are averaged smoothly.
+    const bool enlarged = dw >= w;
+    mirror.setNearest(enlarged);
+    addImageSampled(dl, static_cast<ImTextureID>(reinterpret_cast<std::intptr_t>(texture)), a, b, ImVec2(0.0f, 0.0f),
+                    ImVec2(1.0f, 1.0f), enlarged);
+    dl->AddRect(ImVec2(a.x - 1.0f, a.y - 1.0f), ImVec2(b.x + 1.0f, b.y + 1.0f), colorOf(t.canvasBorder));
+}
+
 // --- commands ----------------------------------------------------------------------------------
 
 bool canRunLayerCommand(const Document& doc, LayerCommand command) {
@@ -121,7 +150,11 @@ bool canRunLayerCommand(const Document& doc, LayerCommand command) {
     switch (command) {
     case LayerCommand::New:
     case LayerCommand::Duplicate:
+    case LayerCommand::NewFrame:
+    case LayerCommand::DuplicateFrame:
         return true;
+    case LayerCommand::DeleteFrame:
+        return doc.frameCount() > 1;
     case LayerCommand::Delete:
     case LayerCommand::Flatten:
         return doc.layerCount() > 1;
@@ -149,6 +182,18 @@ bool runLayerCommand(Document& doc, LayerCommand command, Toasts& toasts) {
         }
         if (!fitsDocumentBudget(width, height, doc.layerCount() + 1, doc.frameCount())) {
             toasts.push(tr(Str::ToastLayerTooBig));
+            return false;
+        }
+        return true;
+    };
+    // A new frame needs a cel for every layer: stay inside the frame limit and the memory budget.
+    const auto roomForFrame = [&] {
+        if (doc.frameCount() >= kMaxFrames) {
+            toasts.push(trf(Str::ToastFrameLimit, {std::to_string(kMaxFrames)}));
+            return false;
+        }
+        if (!fitsDocumentBudget(width, height, doc.layerCount(), doc.frameCount() + 1)) {
+            toasts.push(tr(Str::ToastFrameTooBig));
             return false;
         }
         return true;
@@ -195,10 +240,45 @@ bool runLayerCommand(Document& doc, LayerCommand command, Toasts& toasts) {
     case LayerCommand::MoveDown:
         result = doc.moveLayer(active, active - 1);
         break;
+    case LayerCommand::NewFrame:
+        if (!roomForFrame())
+            return false;
+        result = doc.addFrame(Document::FrameFill::Empty);
+        break;
+    case LayerCommand::DuplicateFrame:
+        if (!roomForFrame())
+            return false;
+        result = doc.addFrame(Document::FrameFill::Duplicate);
+        break;
+    case LayerCommand::DeleteFrame:
+        result = doc.deleteFrame(doc.activeFrame());
+        break;
     }
     if (result == Document::OpResult::NoMemory)
         reportNoMemory(toasts);
     return result == Document::OpResult::Applied;
+}
+
+std::optional<LayerCommand> drawLayerMenuItems(const Document& doc, const Keymap* keymap, bool ready) {
+    std::optional<LayerCommand> picked;
+    const auto item = [&](Icon icon, const char* label, LayerCommand command) {
+        const bool enabled = ready && canRunLayerCommand(doc, command);
+        const bool clicked = keymap && command == LayerCommand::New
+                                 ? actionMenuItem(*keymap, icon, label, Action::NewLayer, nullptr, enabled)
+                                 : iconMenuItem(icon, label, nullptr, nullptr, enabled);
+        if (clicked)
+            picked = command;
+    };
+    item(Icon::AddLayer, tr(Str::MenuNewLayer), LayerCommand::New);
+    item(Icon::Duplicate, tr(Str::MenuDuplicateLayer), LayerCommand::Duplicate);
+    item(Icon::Delete, tr(Str::MenuDeleteLayer), LayerCommand::Delete);
+    ImGui::Separator();
+    item(Icon::Merge, tr(Str::MenuMergeDown), LayerCommand::MergeDown);
+    item(Icon::RoadRollerFlatten, tr(Str::MenuFlattenImage), LayerCommand::Flatten);
+    ImGui::Separator();
+    item(Icon::ItemForward, tr(Str::MenuMoveLayerUp), LayerCommand::MoveUp);
+    item(Icon::ItemBackward, tr(Str::MenuMoveLayerDown), LayerCommand::MoveDown);
+    return picked;
 }
 
 // --- the Layers panel --------------------------------------------------------------------------
@@ -284,18 +364,7 @@ void LayersPanel::draw(Document& doc, bool gestureActive, Toasts& toasts) {
     const int activeFrame = doc.activeFrame();
     std::vector<Op> ops;
 
-    // The footer under the list: opacity slider and the four buttons, which wrap to more rows in a narrow panel.
     const float frameHeight = ImGui::GetFrameHeight();
-    const float gap = style.ItemSpacing.x;
-    const float available = ImGui::GetContentRegionAvail().x;
-    float buttonNeed = 0.0f;
-    for (const Button& b : kButtons)
-        buttonNeed = std::max(buttonNeed, ImGui::CalcTextSize(tr(b.label)).x + style.FramePadding.x * 2.0f);
-    const int perRow = std::clamp(static_cast<int>((available + gap) / (buttonNeed + gap)), 1, 4);
-    const int buttonRows = (4 + perRow - 1) / perRow;
-    const float buttonWidth = std::floor((available - gap * static_cast<float>(perRow - 1)) / static_cast<float>(perRow));
-    const float footer = ImGui::GetTextLineHeight() + frameHeight + static_cast<float>(buttonRows) * frameHeight +
-                         style.ItemSpacing.y * static_cast<float>(buttonRows + 2);
 
     // --- rows -------------------------------------------------------------------------------------
     const float rowHeight = std::round(em * 2.7f);
@@ -304,7 +373,22 @@ void LayersPanel::draw(Document& doc, bool gestureActive, Toasts& toasts) {
     const float thumbBox = rowHeight - 2.0f * pad;
     const float barWidth = std::max(2.0f, std::round(3.0f * uiScale()));
 
-    if (ImGui::BeginChild("##layerRows", ImVec2(0.0f, -footer), ImGuiChildFlags_Borders)) {
+    // The list takes what the footer (properties card and toolbar, measured last frame) leaves; a very short panel
+    // keeps room for a couple of rows and scrolls the rest.
+    if (footerHeight_ <= 0.0f)
+        footerHeight_ = std::round(em * 13.0f);
+    panel::sectionHeader(tr(Str::LayerSectionLayers));
+    const float listHeight = std::max(rowHeight * 2.5f, ImGui::GetContentRegionAvail().y - footerHeight_);
+    const panel::Colors panelColors = panel::colors();
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, panelColors.track);
+    ImGui::PushStyleColor(ImGuiCol_Border, panelColors.cardBorder);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, std::round(em * 0.35f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, std::round(em * 0.15f)));
+    const bool listVisible = ImGui::BeginChild("##layerRows", ImVec2(0.0f, listHeight),
+                                               ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding);
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(2);
+    if (listVisible) {
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(style.ItemSpacing.x, 0.0f));
         ImDrawList* dl = ImGui::GetWindowDrawList();
         ImGuiListClipper clipper;
@@ -393,27 +477,7 @@ void LayersPanel::draw(Document& doc, bool gestureActive, Toasts& toasts) {
                 const CelId cel = doc.celId(i, activeFrame);
                 if (cel != kNoCel) {
                     Thumb& thumb = thumbFor(doc, cel, i, activeFrame);
-                    const float top = std::round(min.y + pad);
-                    const ImVec2 boxMin(std::round(thumbX), top);
-                    const ImVec2 boxMax(boxMin.x + thumbBox, top + thumbBox);
-                    if (SDL_Texture* texture = thumb.mirror.texture()) {
-                        const float w = static_cast<float>(thumb.mirror.width());
-                        const float h = static_cast<float>(thumb.mirror.height());
-                        const float scale = std::min(thumbBox / w, thumbBox / h);
-                        const float dw = std::max(1.0f, std::floor(w * scale));
-                        const float dh = std::max(1.0f, std::floor(h * scale));
-                        const ImVec2 a(std::round(boxMin.x + (thumbBox - dw) * 0.5f), std::round(boxMin.y + (thumbBox - dh) * 0.5f));
-                        const ImVec2 b(a.x + dw, a.y + dh);
-                        drawChecker(dl, a, b, std::max(2.0f, std::round(thumbBox / 8.0f)));
-                        // Enlarged previews keep hard pixels; reduced ones are averaged smoothly.
-                        const bool enlarged = dw >= w;
-                        thumb.mirror.setNearest(enlarged);
-                        addImageSampled(dl, static_cast<ImTextureID>(reinterpret_cast<std::intptr_t>(texture)), a, b,
-                                        ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f), enlarged);
-                        dl->AddRect(ImVec2(a.x - 1.0f, a.y - 1.0f), ImVec2(b.x + 1.0f, b.y + 1.0f), colorOf(t.canvasBorder));
-                    } else {
-                        dl->AddRect(boxMin, boxMax, colorOf(t.canvasBorder));
-                    }
+                    drawThumbnail(dl, thumb.mirror, ImVec2(std::round(thumbX), std::round(min.y + pad)), thumbBox);
                 }
 
                 // Name: plain text, or a text field while renaming.
@@ -452,35 +516,65 @@ void LayersPanel::draw(Document& doc, bool gestureActive, Toasts& toasts) {
     }
     ImGui::EndChild();
 
-    // --- opacity ----------------------------------------------------------------------------------
+    // --- footer: the active layer's properties in a card, then the toolbar --------------------------
+    const float footerTop = ImGui::GetCursorPosY();
     const LayerInfo activeInfo = doc.layer(active);
-    ImGui::TextUnformatted(tr(Str::LayerOpacity));
-    if (!ImGui::IsAnyItemActive())
-        opacityPercent_ = percentOf(activeInfo.opacity);
-    ImGui::SetNextItemWidth(-FLT_MIN);
-    ImGui::SliderInt("##opacity", &opacityPercent_, 0, 100, "%d%%", ImGuiSliderFlags_AlwaysClamp);
-    if (ImGui::IsItemDeactivatedAfterEdit()) { // applied on release: one drag is one undo step
-        Op op{Op::Kind::Opacity, activeInfo.id};
-        op.percent = opacityPercent_;
-        ops.push_back(std::move(op));
-    }
-
-    // --- buttons ----------------------------------------------------------------------------------
-    int shown = 0;
-    for (const Button& b : kButtons) {
-        if (shown % perRow != 0)
-            ImGui::SameLine();
-        ++shown;
-        ImGui::BeginDisabled(!canRunLayerCommand(doc, b.command));
-        if (ImGui::Button(tr(b.label), ImVec2(buttonWidth, 0.0f))) {
-            Op op{Op::Kind::Command};
-            op.command = b.command;
+    ImGui::Dummy(ImVec2(0.0f, std::round(em * 0.1f)));
+    if (panel::beginCard("##layerProps", tr(Str::LayerCardProps))) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(tr(Str::LayerOpacity));
+        if (!ImGui::IsAnyItemActive())
+            opacityPercent_ = percentOf(activeInfo.opacity);
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        ImGui::SliderInt("##opacity", &opacityPercent_, 0, 100, "%d%%", ImGuiSliderFlags_AlwaysClamp);
+        if (ImGui::IsItemDeactivatedAfterEdit()) { // applied on release: one drag is one undo step
+            Op op{Op::Kind::Opacity, activeInfo.id};
+            op.percent = opacityPercent_;
             ops.push_back(std::move(op));
         }
-        ImGui::EndDisabled();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip | ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("%s", tr(b.tip));
+
+        // Visible and Locked toggles side by side, with their words when both fit, otherwise icon only.
+        const float gap = style.ItemSpacing.x;
+        const float half = std::floor((ImGui::GetContentRegionAvail().x - gap) * 0.5f);
+        const char* visibleLabel = tr(Str::LayerPropVisible);
+        const char* lockedLabel = tr(Str::LayerPropLocked);
+        const bool withText = half >= std::max(iconTextButtonWidth(visibleLabel), iconTextButtonWidth(lockedLabel));
+        const Icon visibleIcon = activeInfo.visible ? Icon::EyeOpenDisplayLayer : Icon::EyeClosedHideLayer;
+        const Icon lockedIcon = activeInfo.locked ? Icon::Locked : Icon::Unlocked;
+        const char* visibleTip = tr(activeInfo.visible ? Str::LayerTipHide : Str::LayerTipShow);
+        const char* lockedTip = tr(activeInfo.locked ? Str::LayerTipUnlock : Str::LayerTipLock);
+        bool toggleVisible = false;
+        bool toggleLock = false;
+        if (withText) {
+            toggleVisible = iconTextButton("##visible", visibleIcon, visibleLabel, ImVec2(half, 0.0f), activeInfo.visible);
+            ImGui::SetItemTooltip("%s", visibleTip);
+            ImGui::SameLine(0.0f, gap);
+            toggleLock = iconTextButton("##locked", lockedIcon, lockedLabel, ImVec2(half, 0.0f), activeInfo.locked);
+            ImGui::SetItemTooltip("%s", lockedTip);
+        } else {
+            toggleVisible = panel::iconButton("##visible", visibleIcon, visibleTip, activeInfo.visible, true, ImVec2(half, frameHeight));
+            ImGui::SameLine(0.0f, gap);
+            toggleLock = panel::iconButton("##locked", lockedIcon, lockedTip, activeInfo.locked, true, ImVec2(half, frameHeight));
+        }
+        if (toggleVisible)
+            ops.push_back(Op{Op::Kind::ToggleVisible, activeInfo.id});
+        if (toggleLock)
+            ops.push_back(Op{Op::Kind::ToggleLock, activeInfo.id});
     }
+    panel::endCard();
+
+    panel::ToolbarItem items[kButtonCount];
+    for (int i = 0; i < kButtonCount; ++i) {
+        const Button& b = kButtons[i];
+        items[i] = {b.id, b.icon, tr(b.tip), canRunLayerCommand(doc, b.command), false};
+    }
+    const int pressed = panel::iconToolbar(items);
+    if (pressed >= 0) {
+        Op op{Op::Kind::Command};
+        op.command = kButtons[pressed].command;
+        ops.push_back(std::move(op));
+    }
+    footerHeight_ = ImGui::GetCursorPosY() - footerTop;
 
     // --- apply what the user did ------------------------------------------------------------------
     for (Op& op : ops) {

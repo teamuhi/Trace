@@ -21,3 +21,25 @@ static_assert(trace::kMaxImageDimension == STBI_MAX_DIMENSIONS, "keep the decode
 
 #define MSF_GIF_IMPL
 #include <msf_gif.h>
+
+#include <climits>
+
+#include "io/image_extra.hpp"
+
+namespace trace {
+
+std::vector<std::uint8_t> zlibCompress(const std::uint8_t* data, std::size_t size) {
+    if (size == 0 || size > static_cast<std::size_t>(INT_MAX))
+        return {};
+    int length = 0;
+    // The compressor only reads the data; the const is cast away for its API.
+    unsigned char* packed = stbi_zlib_compress(const_cast<unsigned char*>(data), static_cast<int>(size), &length,
+                                               stbi_write_png_compression_level);
+    if (!packed)
+        return {};
+    std::vector<std::uint8_t> out(packed, packed + length);
+    STBIW_FREE(packed);
+    return out;
+}
+
+} // namespace trace

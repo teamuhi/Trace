@@ -9,6 +9,7 @@
 
 #include "core/cel_grid.hpp"
 #include "core/document.hpp"
+#include "core/palette.hpp"
 #include "core/transform.hpp"
 #include "io/pixel_project.hpp"
 #include "io/project_io.hpp"
@@ -552,4 +553,126 @@ TEST_CASE("thumbnailOf averages by alpha, so transparent pixels never tint the c
         if (p.a != 0)
             CHECK(p.g == 255); // the color of a covered pixel is the real color
     }
+}
+
+// --- palette in META -----------------------------------------------------------------------------
+
+TEST_CASE("A palette round trips through the project file") {
+    TempDir dir;
+    const fs::path path = dir.path / "pal.tpix";
+    Document source = buildDocument();
+    Palette palette;
+    palette.name = "Sunset";
+    palette.colors = {Rgba8{0, 0, 0, 255}, Rgba8{255, 128, 1, 255}, Rgba8{171, 205, 239, 255}};
+    CHECK(savePixelProject(path, source, &palette).empty());
+
+    PixelProjectLoad load = loadPixelProject(path);
+    REQUIRE_MESSAGE(load.store.has_value(), load.error);
+    REQUIRE(load.palette.has_value());
+    CHECK(*load.palette == palette);
+}
+
+TEST_CASE("A project without a palette loads with nullopt, and an empty palette stays empty") {
+    Document source = buildDocument();
+    ProjectData plain = pixelProjectData(source);
+    CHECK(plain.meta.section("palette") == nullptr);
+    CHECK_FALSE(decode(std::move(plain)).palette.has_value());
+
+    Palette empty;
+    const PixelProjectLoad load = decode(pixelProjectData(source, &empty));
+    REQUIRE(load.store.has_value());
+    REQUIRE(load.palette.has_value());
+    CHECK(load.palette->colors.empty());
+    CHECK(load.palette->name.empty());
+}
+
+TEST_CASE("A palette larger than the cap is trimmed when written and when read") {
+    Document source = buildDocument();
+    Palette big;
+    for (int i = 0; i < 300; ++i)
+        big.colors.push_back(Rgba8{static_cast<std::uint8_t>(i), static_cast<std::uint8_t>(i >> 8), 7, 255});
+    const PixelProjectLoad load = decode(pixelProjectData(source, &big));
+    REQUIRE(load.palette.has_value());
+    CHECK(load.palette->colors.size() == kMaxPaletteColors);
+    CHECK(load.palette->colors.front() == big.colors.front());
+
+    ProjectData hostile = baseProject();
+    hostile.meta.set("palette", "count", "999999999999");
+    for (int i = 0; i < 400; ++i)
+        hostile.meta.set("palette", "c" + std::to_string(i), "00FF00");
+    const PixelProjectLoad capped = decode(std::move(hostile));
+    REQUIRE(capped.store.has_value());
+    REQUIRE(capped.palette.has_value());
+    CHECK(capped.palette->colors.size() == kMaxPaletteColors);
+}
+
+TEST_CASE("Hostile [palette] sections never fail the load") {
+    // Malformed colors are skipped, good ones kept in order; the color is forced opaque.
+    ProjectData data = baseProject();
+    data.meta.set("palette", "name", "  Bad\tname \x01  ");
+    data.meta.set("palette", "count", "6");
+    data.meta.set("palette", "c0", "FF0000");
+    data.meta.set("palette", "c1", "nothex");
+    data.meta.set("palette", "c2", "#00ff00");
+    data.meta.set("palette", "c3", "12345");
+    data.meta.set("palette", "c4", "0000FFAA");
+    data.meta.set("palette", "c5", "");
+    data.meta.set("palette", "c6", "ABCDEF"); // beyond count: ignored
+    PixelProjectLoad load = decode(std::move(data));
+    REQUIRE(load.store.has_value());
+    REQUIRE(load.palette.has_value());
+    CHECK(load.palette->name == "Badname");
+    REQUIRE(load.palette->colors.size() == 2);
+    CHECK(load.palette->colors[0] == kRed);
+    CHECK(load.palette->colors[1] == kGreen);
+
+    // A section with nothing usable and no explicit count=0 is damaged: no palette, but the project loads.
+    ProjectData junk = baseProject();
+    junk.meta.set("palette", "c0", "zzzzzz");
+    junk.meta.set("palette", "count", "lots");
+    load = decode(std::move(junk));
+    CHECK(load.store.has_value());
+    CHECK_FALSE(load.palette.has_value());
+
+    ProjectData bare = baseProject();
+    bare.meta.set("palette", "name", "Only a name");
+    load = decode(std::move(bare));
+    CHECK(load.store.has_value());
+    CHECK_FALSE(load.palette.has_value());
+
+    // count=0 is an explicit empty palette (and wins over stray colors).
+    ProjectData zero = baseProject();
+    zero.meta.set("palette", "count", "0");
+    zero.meta.set("palette", "c0", "FF0000");
+    load = decode(std::move(zero));
+    REQUIRE(load.palette.has_value());
+    CHECK(load.palette->colors.empty());
+
+    // A negative count is malformed, so the colors are read up to the cap.
+    ProjectData negative = baseProject();
+    negative.meta.set("palette", "count", "-5");
+    negative.meta.set("palette", "c0", "FF0000");
+    load = decode(std::move(negative));
+    REQUIRE(load.palette.has_value());
+    CHECK(load.palette->colors.size() == 1);
+
+    // A very long name is cut to the name limit.
+    ProjectData longName = baseProject();
+    longName.meta.set("palette", "name", std::string(5000, 'n'));
+    longName.meta.set("palette", "c0", "FF0000");
+    load = decode(std::move(longName));
+    REQUIRE(load.palette.has_value());
+    CHECK(load.palette->name.size() == kMaxPaletteNameBytes);
+}
+
+TEST_CASE("A palette does not disturb the document in the file") {
+    Document source = buildDocument();
+    Palette palette;
+    palette.colors = {kRed};
+    Document back(1, 1);
+    PixelProjectLoad load = decode(pixelProjectData(source, &palette));
+    REQUIRE(load.store.has_value());
+    REQUIRE(back.loadStore(std::move(*load.store)));
+    CHECK(back.layerCount() == source.layerCount());
+    CHECK(sameImage(back.cel(0, 0), source.cel(0, 0)));
 }

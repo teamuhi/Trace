@@ -19,6 +19,7 @@ constexpr const char kBmp[] = "image/bmp";
 struct ClipData {
     std::vector<unsigned char> png;
     std::vector<unsigned char> bmp;
+    ClipboardToken token; // cleared when SDL lets go of this data
 };
 
 const void* SDLCALL provide(void* userdata, const char* mime, size_t* size) {
@@ -37,7 +38,10 @@ const void* SDLCALL provide(void* userdata, const char* mime, size_t* size) {
 }
 
 void SDLCALL release(void* userdata) {
-    delete static_cast<ClipData*>(userdata);
+    const ClipData* data = static_cast<ClipData*>(userdata);
+    if (data->token)
+        data->token->store(false);
+    delete data;
 }
 
 LoadResult failure(const char* message) {
@@ -48,7 +52,7 @@ LoadResult failure(const char* message) {
 
 } // namespace
 
-bool setClipboardImage(const Image& image) {
+bool setClipboardImage(const Image& image, ClipboardToken token) {
     if (image.empty())
         return false;
     auto* data = new (std::nothrow) ClipData;
@@ -66,12 +70,16 @@ bool setClipboardImage(const Image& image) {
         return false;
     }
 
+    data->token = token;
+
     // From here SDL owns `data` and calls `release` when the clipboard changes, even if this call fails.
     static const char* const mimes[] = {kPng, kBmp};
     if (!SDL_SetClipboardData(provide, release, data, mimes, 2)) {
         SDL_Log("SDL_SetClipboardData failed: %s", SDL_GetError());
         return false;
     }
+    if (token)
+        token->store(true); // after the call: replacing earlier data runs that data's release first
     return true;
 }
 

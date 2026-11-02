@@ -6,6 +6,7 @@
 #include <memory>
 #include <utility>
 
+#include "tools/text_tool.hpp"
 #include "tools/tool.hpp"
 
 namespace trace {
@@ -30,8 +31,10 @@ public:
     // Why the last press did not start a gesture. A press is refused when it would edit a layer the user
     // cannot edit: the active layer is hidden or locked. Reading pixels (Picker) and drawing a selection
     // marquee are always allowed; moving selected pixels is not. Reset by every press.
-    enum class Refusal { None, LayerHidden, LayerLocked };
+    enum class Refusal { None, LayerHidden, LayerLocked, Playing, FillUnbounded };
     Refusal lastRefusal() const noexcept { return refusal_; }
+    // While set (an animation is playing), a press that would edit pixels is refused with Refusal::Playing.
+    void setEditingBlocked(bool blocked) noexcept { editingBlocked_ = blocked; }
     // Counts the presses that were refused, so the UI can show one message per refused click even when two in
     // a row have the same reason.
     std::uint32_t refusalCount() const noexcept { return refusalCount_; }
@@ -42,6 +45,20 @@ public:
     void cancel(Document& doc);
 
     void swapColors() noexcept { std::swap(settings_.primary, settings_.secondary); }
+
+    // --- the Text tool's open box ---------------------------------------------------------------------
+    // Typing happens over many frames, outside any gesture; see TextTool.
+    TextTool& text() noexcept { return static_cast<TextTool&>(*tools_[static_cast<std::size_t>(ToolId::Text)]); }
+    const TextTool& text() const noexcept {
+        return static_cast<const TextTool&>(*tools_[static_cast<std::size_t>(ToolId::Text)]);
+    }
+    bool textEditing() const noexcept { return text().editing(); }
+    // Draws the open text into the active layer as one undo step and closes the box. Nothing is drawn (the box is
+    // just closed) when the document or layer changed since it opened, or the layer is hidden or locked now.
+    // Returns whether pixels changed.
+    bool commitText(Document& doc);
+    // Closes the box without drawing.
+    void discardText() noexcept { text().discard(); }
 
     // Brush ring radius for the current tool in image pixels (0 for none).
     float cursorRadius() const noexcept;
@@ -63,6 +80,7 @@ private:
 
     ToolId current_ = ToolId::Pencil;
     bool active_ = false;
+    bool editingBlocked_ = false;
     Refusal refusal_ = Refusal::None;
     std::uint32_t refusalCount_ = 0;
     std::uint64_t gestureGeneration_ = 0;

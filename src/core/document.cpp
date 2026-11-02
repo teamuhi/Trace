@@ -120,6 +120,7 @@ void Document::load(Image image) {
     history_.clear();
     selection_.clear();
     guides_.clear();
+    endless_ = false;
     ++generation_;
     ++revision_;
     refreshDerived();
@@ -194,6 +195,7 @@ bool Document::loadStore(CelStore store) {
     history_.clear();
     selection_.clear();
     guides_.clear();
+    endless_ = false;
     ++generation_;
     refreshDerived();
     markAllDirty();
@@ -354,11 +356,15 @@ bool Document::stepHistory(bool undoing) {
         return false;
 
     const CelId before = activeCel_;
+    const int originX = store_.layout.originX;
+    const int originY = store_.layout.originY;
     try {
         const IRect changed = undoing ? history_.undo(store_, committed_) : history_.redo(store_, committed_);
         if (changed.empty())
             return false;
         refreshDerived();
+        if (store_.layout.originX != originX || store_.layout.originY != originY)
+            guides_.shift(originX - store_.layout.originX, originY - store_.layout.originY, image().width(), image().height());
         if (next->kind == History::StepKind::Structure || activeCel_ != before) {
             if (activeCel_ != before)
                 ++generation_;
@@ -453,6 +459,48 @@ Document::OpResult Document::resizeCanvas(int width, int height, Anchor anchor, 
     return result;
 }
 
+Document::OpResult Document::growCanvas(int left, int top, int right, int bottom) {
+    left = std::max(left, 0);
+    top = std::max(top, 0);
+    right = std::max(right, 0);
+    bottom = std::max(bottom, 0);
+    if (image().empty() || (left == 0 && top == 0 && right == 0 && bottom == 0) || selection_.floating())
+        return OpResult::Nothing;
+    const long long newW = static_cast<long long>(image().width()) + left + right;
+    const long long newH = static_cast<long long>(image().height()) + top + bottom;
+    if (!fitsDocumentBudget(newW, newH, layerCount(), frameCount()))
+        return OpResult::NoMemory;
+    commit();
+    if (!edits_.empty())
+        return OpResult::NoMemory; // the pending edits could not be recorded, and would be lost
+    const int oldH = image().height();
+    try {
+        Layout next = store_.layout;
+        next.originX -= left;
+        next.originY -= top;
+        CelPool added;
+        CelId id = nextCelId_;
+        for (CelId& slot : next.grid) {
+            const Image& src = store_.pool.at(slot);
+            Image out(static_cast<int>(newW), static_cast<int>(newH));
+            for (int y = 0; y < oldH; ++y) {
+                const std::span<const Rgba8> from = src.row(y);
+                std::copy(from.begin(), from.end(), out.row(y + top).begin() + left);
+            }
+            added.emplace(id, std::move(out));
+            slot = id++;
+        }
+        const OpResult result = applyLayout(std::move(next), std::move(added), id, nextLayerId_);
+        if (result == OpResult::Applied) {
+            selection_.shiftBy(left, top);
+            guides_.shift(left, top, static_cast<int>(newW), static_cast<int>(newH));
+        }
+        return result;
+    } catch (const std::bad_alloc&) {
+        return OpResult::NoMemory;
+    }
+}
+
 Document::OpResult Document::cropToSelection() {
     const IRect rect = intersectionOf(selection_.rect(), bounds());
     if (!selection_.active() || rect.empty())
@@ -462,6 +510,48 @@ Document::OpResult Document::cropToSelection() {
     if (result == OpResult::Applied)
         guides_.shift(-rect.x0, -rect.y0, rect.width(), rect.height());
     return result;
+}
+
+Document::OpResult Document::replaceColor(Rgba8 from, Rgba8 to, ReplaceScope scope) {
+    if (image().empty() || from == to)
+        return OpResult::Nothing;
+    if (!beginOp())
+        return OpResult::NoMemory;
+    try {
+        const Layout& cur = store_.layout;
+        const std::size_t stride = static_cast<std::size_t>(cur.layerCount());
+        Layout next = cur;
+        CelPool added;
+        CelId id = nextCelId_;
+        // Only a cel that has a match is replaced (by a fresh copy); the others keep their id and their pixels.
+        for (std::size_t slot = 0; slot < next.grid.size(); ++slot) {
+            const int layer = static_cast<int>(slot % stride);
+            const int frame = static_cast<int>(slot / stride);
+            if (cur.layers[static_cast<std::size_t>(layer)].locked)
+                continue;
+            if (scope == ReplaceScope::Cel ? (layer != cur.activeLayer || frame != cur.activeFrame)
+                                           : (scope == ReplaceScope::Layer && layer != cur.activeLayer))
+                continue;
+            const Image& src = store_.pool.at(cur.grid[slot]);
+            const std::span<const Rgba8> pixels = src.pixels();
+            if (std::find(pixels.begin(), pixels.end(), from) == pixels.end())
+                continue;
+            if (id == UINT32_MAX)
+                return OpResult::Nothing; // out of ids (not reachable in practice)
+            Image out = src;
+            for (Rgba8& p : out.pixels()) {
+                if (p == from)
+                    p = to;
+            }
+            added.emplace(id, std::move(out));
+            next.grid[slot] = id++;
+        }
+        if (added.empty())
+            return OpResult::Nothing;
+        return applyLayout(std::move(next), std::move(added), id, nextLayerId_);
+    } catch (const std::bad_alloc&) {
+        return OpResult::NoMemory;
+    }
 }
 
 // --- layers and frames -----------------------------------------------------------------------------
@@ -711,6 +801,68 @@ Document::OpResult Document::addFrame(FrameFill fill) {
         next.activeFrame = at;
         fromRows(next, rows);
         return applyLayout(std::move(next), std::move(added), id, nextLayerId_);
+    } catch (const std::bad_alloc&) {
+        return OpResult::NoMemory;
+    }
+}
+
+Document::OpResult Document::importFrames(std::span<const Image> pictures, std::span<const int> durationsMs, int x, int y,
+                                          std::string layerName) {
+    const Layout& cur = store_.layout;
+    if (image().empty() || pictures.empty() || nextLayerId_ == UINT32_MAX)
+        return OpResult::Nothing;
+    const long long needFrames = std::max<long long>(cur.frameCount(), static_cast<long long>(cur.activeFrame) + static_cast<long long>(pictures.size()));
+    if (cur.layerCount() >= kMaxLayers || needFrames > kMaxFrames ||
+        !fitsDocumentBudget(image().width(), image().height(), cur.layerCount() + 1, needFrames))
+        return OpResult::NoMemory;
+    if (!beginOp())
+        return OpResult::NoMemory;
+    try {
+        Layout next = cur;
+        Rows rows = toRows(cur);
+        CelPool added;
+        CelId id = nextCelId_;
+        const int w = image().width();
+        const int h = image().height();
+        const int at = cur.activeLayer + 1;
+
+        LayerInfo info;
+        info.id = nextLayerId_;
+        info.name = cleanName(std::move(layerName));
+        if (info.name.empty())
+            info.name = "Layer " + std::to_string(info.id);
+        next.layers.insert(next.layers.begin() + at, std::move(info));
+
+        // Frames the pictures run past the end of the document.
+        while (static_cast<long long>(next.frames.size()) < needFrames) {
+            const std::size_t i = next.frames.size() - static_cast<std::size_t>(cur.activeFrame);
+            const int ms = i < durationsMs.size() ? durationsMs[i] : kDefaultFrameMs;
+            next.frames.push_back(FrameInfo{std::clamp(ms, kMinFrameMs, kMaxFrameMs)});
+            std::vector<CelId> blank;
+            for (int l = 0; l < cur.layerCount(); ++l) {
+                added.emplace(id, Image(w, h));
+                blank.push_back(id++);
+            }
+            rows.push_back(std::move(blank));
+        }
+
+        for (std::size_t f = 0; f < rows.size(); ++f) {
+            Image layerCel(w, h);
+            const std::size_t pictureIndex = f - static_cast<std::size_t>(cur.activeFrame);
+            if (f >= static_cast<std::size_t>(cur.activeFrame) && pictureIndex < pictures.size()) {
+                const Image& src = pictures[pictureIndex];
+                const IRect area = intersectionOf(IRect{x, y, x + src.width(), y + src.height()}, IRect{0, 0, w, h});
+                for (int row = area.y0; row < area.y1; ++row) {
+                    const std::span<const Rgba8> from = src.row(row - y);
+                    std::copy(from.begin() + (area.x0 - x), from.begin() + (area.x1 - x), layerCel.row(row).begin() + area.x0);
+                }
+            }
+            added.emplace(id, std::move(layerCel));
+            rows[f].insert(rows[f].begin() + at, id++);
+        }
+        next.activeLayer = at;
+        fromRows(next, rows);
+        return applyLayout(std::move(next), std::move(added), id, nextLayerId_ + 1);
     } catch (const std::bad_alloc&) {
         return OpResult::NoMemory;
     }

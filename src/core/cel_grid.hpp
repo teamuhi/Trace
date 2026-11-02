@@ -65,6 +65,10 @@ struct Layout {
     std::vector<CelId> grid; // frames.size() * layers.size() ids; grid[frame * layers.size() + layer]
     int activeLayer = 0;
     int activeFrame = 0;
+    // Endless whiteboards only: the world position of image pixel (0, 0). Growing the board to the left or top
+    // moves it, so what the user drew keeps its world position. Always 0 for ordinary documents.
+    int originX = 0;
+    int originY = 0;
 
     int layerCount() const noexcept { return static_cast<int>(layers.size()); }
     int frameCount() const noexcept { return static_cast<int>(frames.size()); }

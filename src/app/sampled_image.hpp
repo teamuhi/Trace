@@ -7,14 +7,15 @@ namespace trace {
 // Draws a texture with nearest-neighbour or linear sampling. ImGui's SDL renderer backend sets the sampling for
 // every draw command itself (linear unless asked otherwise) and ignores the texture's own scale mode, so the
 // request goes through ImGui's standard draw callbacks, bracketing just this one image. A backend that does not
-// offer the callbacks draws with its default.
+// offer the callbacks draws with its default. `tint` multiplies the texture's colors (and its alpha), so a
+// translucent or colored copy of the same texture needs no extra one.
 inline void addImageSampled(ImDrawList* dl, ImTextureRef texture, ImVec2 a, ImVec2 b, ImVec2 uv0 = ImVec2(0.0f, 0.0f),
-                            ImVec2 uv1 = ImVec2(1.0f, 1.0f), bool nearest = true) {
+                            ImVec2 uv1 = ImVec2(1.0f, 1.0f), bool nearest = true, ImU32 tint = IM_COL32_WHITE) {
     const ImGuiPlatformIO& io = ImGui::GetPlatformIO();
     const bool switched = nearest && io.DrawCallback_SetSamplerNearest && io.DrawCallback_SetSamplerLinear;
     if (switched)
         dl->AddCallback(io.DrawCallback_SetSamplerNearest, nullptr);
-    dl->AddImage(texture, a, b, uv0, uv1);
+    dl->AddImage(texture, a, b, uv0, uv1, tint);
     if (switched)
         dl->AddCallback(io.DrawCallback_SetSamplerLinear, nullptr);
 }

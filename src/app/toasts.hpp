@@ -1,12 +1,14 @@
 #pragma once
 
+#include <imgui.h>
+
 #include <string>
 #include <vector>
 
 namespace trace {
 
-// Short messages that appear in the bottom-right corner of the window and fade out by themselves: "Saved
-// photo.png", "Copied selection". They never take input or focus. Failures the user must act on stay modal
+// Short messages that appear at the top center of the canvas and fade out by themselves: "Saved photo.png",
+// "Copied selection". They never take input or focus. Failures the user must act on stay modal
 // dialogs; a toast is for things that are fine, or a minor problem that needs no decision.
 class Toasts {
 public:
@@ -16,6 +18,11 @@ public:
 
     // Safe to call at any time, also while the app sleeps: the clock starts when the toast is first drawn.
     void push(std::string text, Kind kind = Kind::Info);
+
+    // The canvas window's rectangle, which the toasts center on. Each workspace calls it every frame from inside its
+    // canvas window; when it was not called this frame (no canvas is showing) the toasts use the top center of the
+    // main window instead.
+    void setCanvasRect(ImVec2 pos, ImVec2 size);
 
     // Draws the live toasts over everything else. Call once per frame, inside the ImGui frame.
     void draw();
@@ -31,6 +38,9 @@ private:
     };
 
     std::vector<Toast> toasts_; // oldest first
+    ImVec2 canvasPos_{0.0f, 0.0f};
+    ImVec2 canvasSize_{0.0f, 0.0f};
+    int canvasFrame_ = -1; // ImGui frame count of the last setCanvasRect
 };
 
 } // namespace trace

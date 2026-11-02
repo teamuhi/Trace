@@ -663,3 +663,44 @@ TEST_CASE("saveAnimatedGif rejects frames it cannot write and leaves existing fi
     const std::string error = saveAnimatedGif(dir / "no" / "such" / "x.gif", solidFrames(2), delays);
     CHECK_FALSE(error.empty());
 }
+
+TEST_CASE("decodeAnimation reads every frame and delay of a GIF") {
+    TempDir dir;
+    const std::vector<Image> frames = solidFrames(3);
+    const std::vector<int> delays = {10, 20, 30};
+    REQUIRE(saveAnimatedGif(dir / "a.gif", frames, delays).empty());
+
+    const AnimationLoadResult anim = loadAnimation(dir / "a.gif", 100, 1'000'000);
+    REQUIRE(anim.frames.size() == 3);
+    CHECK(anim.totalFrames == 3);
+    CHECK(anim.delaysMs == std::vector<int>{100, 200, 300}); // hundredths of a second in the file, milliseconds out
+    CHECK(anim.frames[1].width() == 8);
+    CHECK(channelDiff(anim.frames[0].get(0, 0), kRed) <= 8);
+}
+
+TEST_CASE("decodeAnimation limits frames and pixels, and treats a still picture as one frame") {
+    TempDir dir;
+    const std::vector<Image> frames = solidFrames(4);
+    REQUIRE(saveAnimatedGif(dir / "a.gif", frames, {}).empty());
+
+    const AnimationLoadResult capped = loadAnimation(dir / "a.gif", 2, 1'000'000);
+    CHECK(capped.frames.size() == 2);
+    CHECK(capped.totalFrames == 4);
+
+    const AnimationLoadResult pixels = loadAnimation(dir / "a.gif", 100, 8 * 6 * 3); // room for three frames
+    CHECK(pixels.frames.size() == 3);
+    CHECK(pixels.totalFrames == 4);
+
+    const AnimationLoadResult tiny = loadAnimation(dir / "a.gif", 100, 10); // not even one frame fits: the first only
+    CHECK(tiny.frames.size() == 1);
+    CHECK(tiny.totalFrames == 4);
+
+    REQUIRE(saveImage(dir / "p.png", frames[0], ImageFormat::Png).empty());
+    const AnimationLoadResult still = loadAnimation(dir / "p.png", 100, 1'000'000);
+    CHECK(still.frames.size() == 1);
+    CHECK(still.totalFrames == 1);
+
+    const AnimationLoadResult missing = loadAnimation(dir / "nope.gif", 100, 1'000'000);
+    CHECK(missing.frames.empty());
+    CHECK_FALSE(missing.error.empty());
+}

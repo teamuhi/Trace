@@ -1,6 +1,9 @@
 #pragma once
 
+#include <span>
+
 #include "core/keymap.hpp"
+#include "tools/tool.hpp"
 
 namespace trace {
 
@@ -13,11 +16,11 @@ struct Settings;
 // and windows; these are the pieces that would otherwise be written twice.
 
 // The shortcuts of the Raster context: Deselect, the pixel grid, ruler, guide and snap switches, choosing a
-// tool, swapping the colors and changing the brush or outline size (kept within maxBrush / maxStroke). The
-// ones that change the picture wait for `idle` (no tool gesture in progress). `mode` is the active mode, so a
-// chord belonging to another mode never fires.
+// tool (only the ones in `toolset`, the tools this mode shows), swapping the colors and changing the brush or outline
+// size (kept within maxBrush / maxStroke). The ones that change the picture wait for `idle` (no tool gesture in
+// progress). `mode` is the active mode, so a chord belonging to another mode never fires.
 void handleRasterShortcuts(const Keymap& keys, ModeContext mode, Settings& settings, bool& settingsDirty, Toolbox& toolbox,
-                           Document& doc, bool idle, int maxBrush, int maxStroke);
+                           Document& doc, bool idle, std::span<const ToolId> toolset, int maxBrush, int maxStroke);
 
 // The View menu entries both modes share: pixel grid, rulers, guides, snap to guides and clear guides.
 void drawRasterViewItems(Settings& settings, bool& settingsDirty, Document& doc);
@@ -26,5 +29,9 @@ void drawRasterViewItems(Settings& settings, bool& settingsDirty, Document& doc)
 // wording; the caller deletes the pixels). False when there is no selection, it lies outside the image, or the
 // clipboard refused (that case shows an error toast).
 bool copySelectionToClipboard(const Document& doc, Toasts& toasts, bool cut);
+
+// Puts the whole picture as shown (every visible layer blended, of the shown frame) on the system clipboard, with the
+// "Copied" toast. False when the clipboard refused (that case shows an error toast).
+bool copyPictureToClipboard(Document& doc, Toasts& toasts);
 
 } // namespace trace

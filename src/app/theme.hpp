@@ -27,6 +27,15 @@ struct ThemeTokens {
     ImVec4 warning;
     ImVec4 button;  // resting color of buttons
     ImVec4 pattern; // marks of the backdrop and transparency patterns (grid lines, dots, ...)
+    ImVec4 symmetryAxis; // the mirror axes of Pixel Art symmetry drawing
+    ImVec4 tileDim;      // what the neighbouring copies of the tile preview fade toward (Pixel Art)
+    ImVec4 onionPrev;    // tint of the onion skin ghosts of earlier frames (Pixel Art)
+    ImVec4 onionNext;    // tint of the onion skin ghosts of later frames (Pixel Art)
+    ImVec4 flowBoard;     // the Flowchart board background
+    ImVec4 flowGrid;      // the Flowchart board grid marks
+    ImVec4 flowHandle;    // selection handles, connection dots and guides on the Flowchart board
+    ImVec4 flowInkAuto;   // stroke and text of a shape whose color is Auto
+    ImVec4 flowPaperAuto; // fill of a shape whose color is Auto
 };
 
 // One entry per token: the key used in settings.ini and theme files, the label on the Theme page, and the
@@ -36,7 +45,7 @@ struct TokenInfo {
     const char* label;
     ImVec4 ThemeTokens::* member;
 };
-inline constexpr int kTokenCount = 16;
+inline constexpr int kTokenCount = 25;
 std::span<const TokenInfo> tokenInfos();
 
 // Colors the user changed, per theme. A token without a value keeps the built-in color.

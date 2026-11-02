@@ -3,6 +3,8 @@
 #include <cassert>
 #include <cstring>
 
+#include "app/icon_widgets.hpp"
+
 namespace trace {
 
 namespace {
@@ -128,6 +130,11 @@ std::string displayShortcut(const Keymap& keymap, Action action) {
 bool actionMenuItem(const Keymap& keymap, const char* label, Action action, bool* selected, bool enabled) {
     const std::string shortcut = displayShortcut(keymap, action);
     return ImGui::MenuItem(label, shortcut.empty() ? nullptr : shortcut.c_str(), selected, enabled);
+}
+
+bool actionMenuItem(const Keymap& keymap, Icon icon, const char* label, Action action, bool* selected, bool enabled) {
+    const std::string shortcut = displayShortcut(keymap, action);
+    return iconMenuItem(icon, label, shortcut.empty() ? nullptr : shortcut.c_str(), selected, enabled);
 }
 
 void setCapturing(bool capturing) {

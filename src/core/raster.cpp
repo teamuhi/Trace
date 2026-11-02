@@ -21,6 +21,21 @@ void applyPaint(Rgba8& pixel, const Paint& paint, unsigned coverage) noexcept {
                                                 : blendOver(pixel, paint.color, coverage);
 }
 
+// Paints every pixel of `box` (already inside the image). With a mask each pixel is painted once per stroke.
+void paintBox(Image& img, const IRect& box, const Paint& paint, StrokeMask* mask) noexcept {
+    for (int py = box.y0; py < box.y1; ++py) {
+        const std::span<Rgba8> row = img.row(py);
+        for (int px = box.x0; px < box.x1; ++px) {
+            if (mask) {
+                if (mask->get(px, py) != 0)
+                    continue; // this stroke already painted it
+                mask->set(px, py, 255);
+            }
+            applyPaint(row[static_cast<std::size_t>(px)], paint, 255);
+        }
+    }
+}
+
 // Paints the horizontal run [xa, xb] on row y at full coverage. The run is clipped to the image.
 void paintSpan(Image& img, int y, int xa, int xb, const Paint& paint) noexcept {
     xa = std::max(xa, 0);
@@ -95,22 +110,26 @@ IRect stampSquareLine(Image& img, int x0, int y0, int x1, int y1, int size, cons
         const IRect box = intersectionOf(
             IRect{static_cast<int>(left), static_cast<int>(top), static_cast<int>(left) + size, static_cast<int>(top) + size},
             bounds);
-        for (int py = box.y0; py < box.y1; ++py) {
-            const std::span<Rgba8> row = img.row(py);
-            for (int px = box.x0; px < box.x1; ++px) {
-                if (mask) {
-                    if (mask->get(px, py) != 0)
-                        continue; // this stroke already painted it
-                    mask->set(px, py, 255);
-                }
-                applyPaint(row[static_cast<std::size_t>(px)], paint, 255);
-            }
-        }
+        paintBox(img, box, paint, mask);
         touched = unionOf(touched, box);
     });
     if (mask)
         mask->markTouched(touched);
     return touched;
+}
+
+IRect stampRect(Image& img, const IRect& rect, const Paint& paint, StrokeMask* mask) {
+    if (img.empty())
+        return {};
+    if (mask && !mask->matches(img))
+        mask = nullptr;
+    const IRect box = intersectionOf(rect, imageBounds(img));
+    if (box.empty())
+        return {};
+    paintBox(img, box, paint, mask);
+    if (mask)
+        mask->markTouched(box);
+    return box;
 }
 
 void StrokeMask::begin(int width, int height) {
@@ -132,7 +151,7 @@ void StrokeMask::end() noexcept {
 }
 
 IRect drawCapsule(Image& img, Vec2f a, Vec2f b, float radius, const Paint& paint, bool antialias,
-                  StrokeMask* mask) {
+                  StrokeMask* mask, float hardness) {
     if (img.empty() || !(radius > 0.0f) || !std::isfinite(radius) || !finite(a) || !finite(b))
         return {};
 
@@ -161,6 +180,9 @@ IRect drawCapsule(Image& img, Vec2f a, Vec2f b, float radius, const Paint& paint
     const float aby = b.y - a.y;
     const float len2 = abx * abx + aby * aby;
     const float r2 = radius * radius;
+    // Width of the edge ramp: one pixel for a hard brush, widening inward to the whole radius for a fully soft one.
+    const float soft = 1.0f - (std::isfinite(hardness) ? std::clamp(hardness, 0.0f, 1.0f) : 1.0f);
+    const float ramp = std::min(1.0f + soft * radius, radius + 0.5f);
 
     for (int y = y0; y < y1; ++y) {
         const std::span<Rgba8> row = img.row(y);
@@ -176,7 +198,7 @@ IRect drawCapsule(Image& img, Vec2f a, Vec2f b, float radius, const Paint& paint
 
             unsigned coverage = 255;
             if (antialias) {
-                const float c = std::clamp(radius + 0.5f - std::sqrt(d2), 0.0f, 1.0f);
+                const float c = std::clamp((radius + 0.5f - std::sqrt(d2)) / ramp, 0.0f, 1.0f);
                 coverage = static_cast<unsigned>(c * 255.0f + 0.5f);
                 if (coverage == 0)
                     continue;
@@ -349,6 +371,86 @@ IRect floodFill(Image& img, int x, int y, Rgba8 color, int tolerance, bool conti
         }
     }
     return touched;
+}
+
+IRect opaqueBounds(const Image& img) {
+    const int w = img.width();
+    const int h = img.height();
+    const auto rowHas = [&](int y) {
+        const std::span<const Rgba8> row = img.row(y);
+        return std::any_of(row.begin(), row.end(), [](const Rgba8& p) { return p.a != 0; });
+    };
+    int top = 0;
+    while (top < h && !rowHas(top))
+        ++top;
+    if (top == h)
+        return {};
+    int bottom = h - 1;
+    while (bottom > top && !rowHas(bottom))
+        --bottom;
+    int left = w;
+    int right = -1;
+    for (int y = top; y <= bottom; ++y) {
+        const std::span<const Rgba8> row = img.row(y);
+        for (int x = 0; x < left; ++x) {
+            if (row[static_cast<std::size_t>(x)].a != 0) {
+                left = x;
+                break;
+            }
+        }
+        for (int x = w - 1; x > right; --x) {
+            if (row[static_cast<std::size_t>(x)].a != 0) {
+                right = x;
+                break;
+            }
+        }
+    }
+    return IRect{left, top, right + 1, bottom + 1};
+}
+
+bool floodTouchesEdge(const Image& img, int x, int y, int tolerance) {
+    if (!img.contains(x, y))
+        return false;
+    const int tol = std::clamp(tolerance, 0, 255);
+    const Rgba8 target = img.get(x, y);
+    const auto matches = [&](Rgba8 p) {
+        return std::abs(static_cast<int>(p.r) - target.r) <= tol && std::abs(static_cast<int>(p.g) - target.g) <= tol &&
+               std::abs(static_cast<int>(p.b) - target.b) <= tol && std::abs(static_cast<int>(p.a) - target.a) <= tol;
+    };
+    const int w = img.width();
+    const int h = img.height();
+    std::vector<std::uint8_t> visited(static_cast<std::size_t>(w) * static_cast<std::size_t>(h), 0);
+    const auto visitedAt = [&](int px, int py) -> std::uint8_t& {
+        return visited[static_cast<std::size_t>(py) * static_cast<std::size_t>(w) + static_cast<std::size_t>(px)];
+    };
+    std::vector<std::pair<int, int>> stack;
+    stack.emplace_back(x, y);
+    while (!stack.empty()) {
+        const auto [sx, sy] = stack.back();
+        stack.pop_back();
+        if (visitedAt(sx, sy) || !matches(img.get(sx, sy)))
+            continue;
+        int left = sx;
+        int right = sx;
+        while (left > 0 && !visitedAt(left - 1, sy) && matches(img.get(left - 1, sy)))
+            --left;
+        while (right < w - 1 && !visitedAt(right + 1, sy) && matches(img.get(right + 1, sy)))
+            ++right;
+        if (left == 0 || right == w - 1 || sy == 0 || sy == h - 1)
+            return true;
+        for (int px = left; px <= right; ++px)
+            visitedAt(px, sy) = 1;
+        for (const int ny : {sy - 1, sy + 1}) {
+            bool inRun = false;
+            for (int px = left; px <= right; ++px) {
+                const bool fillable = !visitedAt(px, ny) && matches(img.get(px, ny));
+                if (fillable && !inRun)
+                    stack.emplace_back(px, ny);
+                inRun = fillable;
+            }
+        }
+    }
+    return false;
 }
 
 } // namespace trace

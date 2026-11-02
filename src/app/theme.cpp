@@ -42,6 +42,15 @@ const ThemeTokens kDark{
     /*warning*/ rgb(240, 180, 70),
     /*button*/ rgb(44, 72, 118),
     /*pattern*/ rgb(150, 154, 162, 60),
+    /*symmetryAxis*/ rgb(255, 110, 200),
+    /*tileDim*/ rgb(22, 23, 25),
+    /*onionPrev*/ rgb(255, 120, 120),
+    /*onionNext*/ rgb(110, 210, 140),
+    /*flowBoard*/ rgb(26, 27, 30),
+    /*flowGrid*/ rgb(150, 154, 162, 50),
+    /*flowHandle*/ rgb(90, 160, 255),
+    /*flowInkAuto*/ rgb(225, 227, 230),
+    /*flowPaperAuto*/ rgb(44, 46, 52),
 };
 
 const ThemeTokens kLight{
@@ -61,6 +70,15 @@ const ThemeTokens kLight{
     /*warning*/ rgb(180, 110, 0),
     /*button*/ rgb(158, 189, 231),
     /*pattern*/ rgb(90, 96, 106, 60),
+    /*symmetryAxis*/ rgb(200, 30, 140),
+    /*tileDim*/ rgb(246, 247, 249),
+    /*onionPrev*/ rgb(225, 60, 60),
+    /*onionNext*/ rgb(30, 150, 80),
+    /*flowBoard*/ rgb(250, 250, 251),
+    /*flowGrid*/ rgb(90, 96, 106, 50),
+    /*flowHandle*/ rgb(25, 103, 210),
+    /*flowInkAuto*/ rgb(32, 33, 36),
+    /*flowPaperAuto*/ rgb(255, 255, 255),
 };
 
 constexpr TokenInfo kTokenInfos[kTokenCount] = {
@@ -80,6 +98,15 @@ constexpr TokenInfo kTokenInfos[kTokenCount] = {
     {"guide", "Guides", &ThemeTokens::guide},
     {"selection", "Selection outline", &ThemeTokens::selection},
     {"warning", "Warnings", &ThemeTokens::warning},
+    {"symmetry_axis", "Mirror axes", &ThemeTokens::symmetryAxis},
+    {"tile_dim", "Tile preview fade", &ThemeTokens::tileDim},
+    {"onion_prev", "Onion skin, earlier frames", &ThemeTokens::onionPrev},
+    {"onion_next", "Onion skin, later frames", &ThemeTokens::onionNext},
+    {"flow_board", "Flowchart board", &ThemeTokens::flowBoard},
+    {"flow_grid", "Flowchart grid", &ThemeTokens::flowGrid},
+    {"flow_handle", "Flowchart handles", &ThemeTokens::flowHandle},
+    {"flow_ink_auto", "Flowchart automatic lines and text", &ThemeTokens::flowInkAuto},
+    {"flow_paper_auto", "Flowchart automatic fill", &ThemeTokens::flowPaperAuto},
 };
 
 ThemeMode g_mode = ThemeMode::System;

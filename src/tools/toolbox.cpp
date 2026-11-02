@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <utility>
 
+#include "core/raster.hpp"
 #include "tools/tool_factories.hpp"
 #include "tools/tool_util.hpp"
 
@@ -23,6 +24,8 @@ std::unique_ptr<Tool> createTool(ToolId id) {
         return createClickTool(id);
     case ToolId::Select:
         return createSelectTool();
+    case ToolId::Text:
+        return createTextTool();
     }
     return createFreehandTool(ToolId::Pencil);
 }
@@ -67,10 +70,21 @@ void Toolbox::press(Document& doc, const PointerEvent& ev) {
     refusal_ = Refusal::None;
     if (wouldEdit(doc, ev)) {
         const LayerInfo& layer = doc.layer(doc.activeLayer());
-        if (!layer.visible)
+        if (editingBlocked_)
+            refusal_ = Refusal::Playing;
+        else if (!layer.visible)
             refusal_ = Refusal::LayerHidden;
         else if (layer.locked)
             refusal_ = Refusal::LayerLocked;
+        else if (current_ == ToolId::Fill && doc.endless()) {
+            // On an endless board a fill that reaches the edge of what is allocated would flood the whole empty board.
+            const Vec2f p = tools::sanitize(ev.pos);
+            const int x = tools::toPixel(p.x);
+            const int y = tools::toPixel(p.y);
+            const Image& img = doc.image();
+            if (settings_.fillGlobal ? img.get(x, y).a == 0 : floodTouchesEdge(img, x, y, settings_.fillTolerance))
+                refusal_ = Refusal::FillUnbounded;
+        }
         if (refusal_ != Refusal::None) {
             ++refusalCount_;
             return; // nothing has been touched, not even a floating selection
@@ -96,6 +110,20 @@ void Toolbox::release(Document& doc, const PointerEvent& ev) {
         active_ = false;
         doc.commit(); // one gesture, one undo step
     }
+}
+
+bool Toolbox::commitText(Document& doc) {
+    TextTool& t = text();
+    if (!t.editing())
+        return false;
+    const LayerInfo& layer = doc.layer(doc.activeLayer());
+    if (t.stale(doc) || !layer.visible || layer.locked) {
+        t.discard();
+        return false;
+    }
+    const bool changed = !t.commit(doc, settings_).empty();
+    doc.commit(); // the text is one undo step
+    return changed;
 }
 
 void Toolbox::cancel(Document& doc) {
@@ -138,6 +166,8 @@ const char* Toolbox::name(ToolId id) noexcept {
         return "Picker";
     case ToolId::Select:
         return "Select";
+    case ToolId::Text:
+        return "Text";
     }
     return "";
 }

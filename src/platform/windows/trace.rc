@@ -1,0 +1,3 @@
+// The icon of Trace.exe (Explorer, the taskbar, the title bar). Generated from src/assets/icons/app_icon.png by
+// make_ico.py. The id is first alphabetically, so Windows picks it as the application icon.
+IDI_TRACE ICON "trace.ico"

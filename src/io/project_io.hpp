@@ -28,6 +28,7 @@ namespace trace {
 inline constexpr std::uint32_t kProjectVersion = 1;
 inline constexpr std::uint32_t kProjectFlow = 1;
 inline constexpr std::uint32_t kProjectPixel = 2;
+inline constexpr std::uint32_t kProjectBoard = 3; // an endless whiteboard (.tboard, see io/board_project.hpp)
 
 inline constexpr std::size_t kMaxProjectBytes = 512u * 1024u * 1024u;
 inline constexpr std::size_t kMaxProjectChunks = 65536;

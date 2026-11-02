@@ -40,9 +40,14 @@ bool equalsIgnoreCase(std::string_view a, std::string_view b) {
 
 constexpr std::array<const char*, 3> kThemeNames = {"system", "light", "dark"};
 constexpr std::array<const char*, 2> kNewDocZoomNames = {"fit", "actual"};
+constexpr std::array<const char*, 2> kWhiteboardNames = {"white", "black"};
 constexpr const std::array<const char*, kPatternStyleCount>& kPatternNames = kPatternStyleKeys;
 constexpr const std::array<const char*, kFontChoiceCount>& kFontNames = kFontChoiceKeys;
 constexpr std::array<const char*, 3> kShapeModeNames = {"outline", "filled", "both"};
+constexpr std::array<const char*, 3> kFlowRouteNames = {"curved", "elbow", "straight"};
+constexpr std::array<const char*, 4> kFlowArrowNames = {"none", "arrow", "open", "dot"};
+constexpr std::array<const char*, 3> kTextAlignNames = {"left", "center", "right"};
+constexpr std::size_t kMaxFontNameBytes = 128; // a font family or style name read from the settings file
 
 void readInt(const IniFile& ini, const char* section, const char* key, int& target, int lo, int hi) {
     if (const std::string* value = ini.get(section, key)) {
@@ -90,6 +95,20 @@ void readColor(const IniFile& ini, const char* key, Rgba8& target) {
         if (const auto parsed = parseColor(*value))
             target = *parsed;
     }
+}
+
+// A path read from the file: control characters dropped, cut to `maxBytes` without splitting a UTF-8 sequence.
+std::string cleanPath(std::string path, std::size_t maxBytes) {
+    path.erase(std::remove_if(path.begin(), path.end(),
+                              [](char c) { return static_cast<unsigned char>(c) < 0x20 || c == 0x7f; }),
+               path.end());
+    if (path.size() > maxBytes) {
+        std::size_t n = maxBytes;
+        while (n > 0 && (static_cast<unsigned char>(path[n]) & 0xC0) == 0x80)
+            --n;
+        path.resize(n);
+    }
+    return path;
 }
 
 void setBool(IniFile& ini, const char* section, const char* key, bool value) {
@@ -140,9 +159,15 @@ bool loadSettings(const std::string& path, Settings& out) {
     readBool(ini, "view", "guides", out.showGuides);
     readBool(ini, "view", "snap_to_guides", out.snapToGuides);
     readBool(ini, "view", "tools_panel", out.showToolsPanel);
+    readBool(ini, "view", "layers_panel", out.showLayersPanel);
     readBool(ini, "view", "status_bar", out.showStatusBar);
     readBool(ini, "view", "sys_stats", out.showSysStats);
     readEnum(ini, "view", "new_doc_zoom", out.newDocZoom, kNewDocZoomNames);
+    {
+        int board = out.whiteboardDark ? 1 : 0;
+        readEnum(ini, "view", "whiteboard_theme", board, kWhiteboardNames);
+        out.whiteboardDark = board == 1;
+    }
 
     readBool(ini, "tools", "restore_last", out.restoreLastToolSettings);
     readToolId(ini, "start_tool", out.startTool);
@@ -155,6 +180,32 @@ bool loadSettings(const std::string& path, Settings& out) {
     readBool(ini, "tools", "erase_to_transparent", t.eraseToTransparent);
     readEnum(ini, "tools", "shape_mode", t.shapeMode, kShapeModeNames);
     readInt(ini, "tools", "fill_tolerance", t.fillTolerance, 0, 255);
+    readInt(ini, "tools", "text_size", t.textSize, ToolSettings::kMinTextSize, ToolSettings::kMaxTextSize);
+    if (const std::string* family = ini.get("tools", "text_font")) {
+        // Older files hold "sans" or "mono"; newer ones the family name.
+        const std::string name = cleanPath(*family, kMaxFontNameBytes);
+        if (equalsIgnoreCase(name, "sans"))
+            t.textFontFamily = "Inter";
+        else if (equalsIgnoreCase(name, "mono"))
+            t.textFontFamily = "JetBrains Mono";
+        else if (!name.empty())
+            t.textFontFamily = name;
+    }
+    if (const std::string* style = ini.get("tools", "text_font_style")) {
+        if (const std::string name = cleanPath(*style, kMaxFontNameBytes); !name.empty())
+            t.textFontStyle = name;
+    }
+    readEnum(ini, "tools", "text_align", t.textAlign, kTextAlignNames);
+    readInt(ini, "tools", "brush_hardness", t.brushHardness, ToolSettings::kMinHardness, 100);
+
+    FlowSettings& fs = out.flow;
+    readInt(ini, "flow", "grid_size", fs.gridSize, kMinFlowGridSize, kMaxFlowGridSize);
+    readBool(ini, "flow", "show_grid", fs.showGrid);
+    readBool(ini, "flow", "snap_to_grid", fs.snapToGrid);
+    readBool(ini, "flow", "smart_guides", fs.smartGuides);
+    readEnum(ini, "flow", "default_route", fs.defaultRoute, kFlowRouteNames);
+    readEnum(ini, "flow", "arrow_start", fs.defaultArrowStart, kFlowArrowNames);
+    readEnum(ini, "flow", "arrow_end", fs.defaultArrowEnd, kFlowArrowNames);
 
     PixelSettings& px = out.pixel;
     readInt(ini, "pixel", "new_width", px.newWidth, 1, kMaxPixelCanvasSide);
@@ -163,6 +214,13 @@ bool loadSettings(const std::string& path, Settings& out) {
     readBool(ini, "pixel", "pixel_perfect", px.pixelPerfectDefault);
     readBool(ini, "pixel", "tools_panel", px.showToolsPanel);
     readBool(ini, "pixel", "layers_panel", px.showLayersPanel);
+    readInt(ini, "pixel", "tile_dim", px.tileDimPercent, 0, 100);
+    readInt(ini, "pixel", "onion_before", px.onionBefore, 0, kMaxOnionFrames);
+    readInt(ini, "pixel", "onion_after", px.onionAfter, 0, kMaxOnionFrames);
+    readInt(ini, "pixel", "onion_opacity", px.onionOpacityPercent, kMinOnionOpacityPercent, 100);
+    readBool(ini, "pixel", "onion_loop", px.onionLoop);
+    if (const std::string* value = ini.get("pixel", "last_palette"))
+        px.lastPalettePath = cleanPath(*value, kMaxPalettePathBytes);
     ToolSettings& pt = px.tools;
     if (const std::string* value = ini.get("pixel", "primary")) {
         if (const auto parsed = parseColor(*value))
@@ -220,9 +278,11 @@ bool saveSettings(const std::string& path, const Settings& s) {
     setBool(ini, "view", "guides", s.showGuides);
     setBool(ini, "view", "snap_to_guides", s.snapToGuides);
     setBool(ini, "view", "tools_panel", s.showToolsPanel);
+    setBool(ini, "view", "layers_panel", s.showLayersPanel);
     setBool(ini, "view", "status_bar", s.showStatusBar);
     setBool(ini, "view", "sys_stats", s.showSysStats);
     ini.set("view", "new_doc_zoom", kNewDocZoomNames[static_cast<std::size_t>(s.newDocZoom)]);
+    ini.set("view", "whiteboard_theme", kWhiteboardNames[s.whiteboardDark ? 1 : 0]);
 
     const ToolSettings& t = s.toolDefaults;
     setBool(ini, "tools", "restore_last", s.restoreLastToolSettings);
@@ -235,6 +295,20 @@ bool saveSettings(const std::string& path, const Settings& s) {
     setBool(ini, "tools", "erase_to_transparent", t.eraseToTransparent);
     ini.set("tools", "shape_mode", kShapeModeNames[static_cast<std::size_t>(t.shapeMode)]);
     ini.set("tools", "fill_tolerance", std::to_string(t.fillTolerance));
+    ini.set("tools", "text_size", std::to_string(t.textSize));
+    ini.set("tools", "text_font", t.textFontFamily);
+    ini.set("tools", "text_font_style", t.textFontStyle);
+    ini.set("tools", "text_align", kTextAlignNames[static_cast<std::size_t>(t.textAlign)]);
+    ini.set("tools", "brush_hardness", std::to_string(t.brushHardness));
+
+    const FlowSettings& fs = s.flow;
+    ini.set("flow", "grid_size", std::to_string(fs.gridSize));
+    setBool(ini, "flow", "show_grid", fs.showGrid);
+    setBool(ini, "flow", "snap_to_grid", fs.snapToGrid);
+    setBool(ini, "flow", "smart_guides", fs.smartGuides);
+    ini.set("flow", "default_route", kFlowRouteNames[static_cast<std::size_t>(fs.defaultRoute)]);
+    ini.set("flow", "arrow_start", kFlowArrowNames[static_cast<std::size_t>(fs.defaultArrowStart)]);
+    ini.set("flow", "arrow_end", kFlowArrowNames[static_cast<std::size_t>(fs.defaultArrowEnd)]);
 
     const PixelSettings& px = s.pixel;
     ini.set("pixel", "new_width", std::to_string(px.newWidth));
@@ -243,6 +317,13 @@ bool saveSettings(const std::string& path, const Settings& s) {
     setBool(ini, "pixel", "pixel_perfect", px.pixelPerfectDefault);
     setBool(ini, "pixel", "tools_panel", px.showToolsPanel);
     setBool(ini, "pixel", "layers_panel", px.showLayersPanel);
+    ini.set("pixel", "tile_dim", std::to_string(px.tileDimPercent));
+    ini.set("pixel", "onion_before", std::to_string(px.onionBefore));
+    ini.set("pixel", "onion_after", std::to_string(px.onionAfter));
+    ini.set("pixel", "onion_opacity", std::to_string(px.onionOpacityPercent));
+    setBool(ini, "pixel", "onion_loop", px.onionLoop);
+    if (!px.lastPalettePath.empty())
+        ini.set("pixel", "last_palette", cleanPath(px.lastPalettePath, kMaxPalettePathBytes));
     ini.set("pixel", "primary", formatColor(px.tools.primary));
     ini.set("pixel", "secondary", formatColor(px.tools.secondary));
     ini.set("pixel", "brush_size", std::to_string(px.tools.brushSize));

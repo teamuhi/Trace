@@ -13,6 +13,7 @@
 #include <vector>
 #include <utility>
 
+#include "app/modal_ui.hpp"
 #include "app/settings.hpp"
 #include "app/theme.hpp"
 #include "core/i18n.hpp"
@@ -74,12 +75,6 @@ std::string overwriteTitle() { return std::string(tr(Str::FileReplaceTitle)) + "
 std::string errorTitle() { return std::string(tr(Str::FileErrorTitle)) + "###Error"; }
 std::string infoTitle() { return std::string(tr(Str::FileInfoTitle)) + "###Info"; }
 
-constexpr ImGuiWindowFlags kModalFlags = ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings;
-
-void centerNextWindow() {
-    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-}
-
 } // namespace
 
 struct FileSession::DialogResult {
@@ -115,9 +110,9 @@ void FileSession::newDocumentNow() {
     doNew();
 }
 
-void FileSession::requestNew() {
+void FileSession::requestNew(int variant) {
     if (!busy() && hasDocument())
-        guard({Followup::Kind::New, {}});
+        guard({Followup::Kind::New, {}, variant});
 }
 
 void FileSession::requestOpen() {
@@ -157,7 +152,7 @@ void FileSession::run(const Followup& followup) {
     case Followup::Kind::None:
         break;
     case Followup::Kind::New:
-        doNew();
+        doNew(followup.variant);
         break;
     case Followup::Kind::OpenPath:
         doOpen(followup.path);
@@ -188,8 +183,8 @@ void FileSession::saveThen(Followup followup) {
     showSaveDialog();
 }
 
-void FileSession::doNew() {
-    const std::string error = adapter_.newBlank();
+void FileSession::doNew(int variant) {
+    const std::string error = variant == 0 ? adapter_.newBlank() : adapter_.newBlankVariant(variant);
     if (!error.empty()) {
         showMessage(error, true);
         return; // the old document is untouched
@@ -210,6 +205,8 @@ void FileSession::doOpen(const fs::path& path) {
 
     path_ = path;
     format_ = adapter_.formatForPath(path);
+    if (format_ && isExport(*format_))
+        format_.reset(); // a picture is not the document: Save must ask where the project goes
     lockInPlace_ = outcome.lockInPlace;
     rememberDirectory(path);
     if (hooks_.documentReplaced)
@@ -217,6 +214,12 @@ void FileSession::doOpen(const fs::path& path) {
 
     if (!outcome.notice.empty())
         showMessage(std::move(outcome.notice), false);
+}
+
+bool FileSession::isExport(int format) const {
+    const auto formats = adapter_.saveFormats();
+    return format >= 0 && static_cast<std::size_t>(format) < formats.size() &&
+           formats[static_cast<std::size_t>(format)].exportOnly;
 }
 
 bool FileSession::writeFile(const fs::path& path, int format, int quality) {
@@ -229,11 +232,17 @@ bool FileSession::writeFile(const fs::path& path, int format, int quality) {
         showMessage(error, true);
         return false;
     }
+    rememberDirectory(path);
+    if (isExport(format)) {
+        // A copy of the document: its own name and unsaved state stay as they were.
+        if (hooks_.saved && !adapter_.savesLater(format))
+            hooks_.saved(utf8FromPath(path.filename()));
+        return true;
+    }
     path_ = path;
     format_ = format;
     lockInPlace_ = false;
     adapter_.markSaved();
-    rememberDirectory(path);
     if (hooks_.saved)
         hooks_.saved(utf8FromPath(path.filename()));
     return true;
@@ -283,8 +292,14 @@ void FileSession::continueSave(const Target& target) {
 void FileSession::finishSave(const Target& target, int quality) {
     const Followup next = std::move(afterSave_);
     afterSave_ = {};
-    if (writeFile(target.path, target.format, quality))
+    if (!writeFile(target.path, target.format, quality))
+        return;
+    // An export does not save the document, so whatever waited for the save (a New, an Open, closing the window)
+    // asks about the unsaved changes again.
+    if (!isExport(target.format))
         run(next);
+    else if (next.kind != Followup::Kind::None)
+        guard(next);
 }
 
 // --- native dialogs ----------------------------------------------------------------------------
@@ -371,22 +386,7 @@ bool FileSession::handleEvent(const SDL_Event& event) {
         return true;
     }
 
-    // Dropping several files delivers one event each. Only the first opens: the rest would replace it
-    // straight away, and the document can only hold one image.
-    switch (event.type) {
-    case SDL_EVENT_DROP_BEGIN:
-    case SDL_EVENT_DROP_COMPLETE:
-        dropConsumed_ = false;
-        return true;
-    case SDL_EVENT_DROP_FILE:
-        if (event.drop.data && !dropConsumed_) {
-            dropConsumed_ = true;
-            requestOpenPath(pathFromUtf8(event.drop.data)); // ignored while a dialog or prompt is open
-        }
-        return true;
-    default:
-        return false;
-    }
+    return false; // dropped files are handled by the App (see App::handleDrop)
 }
 
 // --- modals ------------------------------------------------------------------------------------
@@ -433,71 +433,50 @@ void FileSession::drawModals() {
         }
     }
 
-    const bool escape = ImGui::IsKeyPressed(ImGuiKey_Escape, false);
-
     switch (modal_) {
     case Modal::None:
         break;
 
     case Modal::Unsaved: {
-        centerNextWindow();
-        if (ImGui::BeginPopupModal(unsavedTitle().c_str(), nullptr, kModalFlags)) {
-            ImGui::TextUnformatted(trf(Str::FileSaveChangesQuestion, {displayName()}).c_str());
-            ImGui::TextDisabled("%s", tr(Str::FileChangesLost));
-            ImGui::Spacing();
+        bool cancelled = false; // the X at the top right (or Escape): keep the document as it is, do nothing further
+        if (modal::begin(unsavedTitle().c_str(), 24.0f, &cancelled)) {
+            modal::paragraph(trf(Str::FileSaveChangesQuestion, {displayName()}).c_str());
+            modal::notice(tr(Str::FileChangesLost), true);
 
-            Followup next;
-            bool save = false;
-            bool discard = false;
-            bool cancel = escape;
-            if (ImGui::Button(tr(Str::WordSave)))
-                save = true;
-            ImGui::SetItemDefaultFocus();
-            ImGui::SameLine();
-            if (ImGui::Button(tr(Str::FileDontSave)))
-                discard = true;
-            ImGui::SameLine();
-            if (ImGui::Button(tr(Str::WordCancel)))
-                cancel = true;
-
-            if (save || discard || cancel) {
+            // Save keeps everything and is what Enter does; Don't Save is the one that loses work, so it is
+            // outlined instead of competing with Save.
+            const int pressed = modal::footer(
+                {{tr(Str::FileDontSave), modal::ButtonKind::DangerQuiet, true, false, false, Icon::Delete},
+                 {tr(Str::WordSave), modal::ButtonKind::Primary, true, true, false, Icon::Save}});
+            if (pressed >= 0 || cancelled) {
                 ImGui::CloseCurrentPopup();
                 modal_ = Modal::None;
-                next = std::move(followup_);
+                Followup next = std::move(followup_);
                 followup_ = {};
-                if (save)
+                if (!cancelled && pressed == 1)
                     saveThen(next);
-                else if (discard)
+                else if (!cancelled && pressed == 0)
                     run(next);
             }
-            ImGui::EndPopup();
+            modal::end();
         }
         break;
     }
 
     case Modal::JpegQuality: {
-        centerNextWindow();
-        if (ImGui::BeginPopupModal(jpegTitle().c_str(), nullptr, kModalFlags)) {
-            ImGui::TextUnformatted(tr(Str::FileQuality));
-            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
-            ImGui::SliderInt("##quality", &jpegQuality_, 1, 100, "%d", ImGuiSliderFlags_AlwaysClamp);
-            ImGui::TextDisabled("%s", tr(Str::FileQualityHint));
-            ImGui::TextDisabled("%s", tr(Str::FileJpegNoAlpha));
-            ImGui::Spacing();
+        if (modal::begin(jpegTitle().c_str(), 24.0f)) {
+            modal::Form form({tr(Str::FileQuality)});
+            form.row(tr(Str::FileQuality));
+            modal::slider("##quality", jpegQuality_, 1, 100, "%d");
+            modal::paragraph(tr(Str::FileQualityHint), true);
+            modal::paragraph(tr(Str::FileJpegNoAlpha), true);
 
-            bool save = false;
-            bool cancel = escape;
-            if (ImGui::Button(tr(Str::WordSave)))
-                save = true;
-            ImGui::SetItemDefaultFocus();
-            ImGui::SameLine();
-            if (ImGui::Button(tr(Str::WordCancel)))
-                cancel = true;
-
-            if (save || cancel) {
+            const int pressed = modal::footer({{tr(Str::WordCancel), modal::ButtonKind::Secondary, true, false, true},
+                                               {tr(Str::WordSave), modal::ButtonKind::Primary, true, true}});
+            if (pressed >= 0) {
                 ImGui::CloseCurrentPopup();
                 modal_ = Modal::None;
-                if (save) {
+                if (pressed == 1) {
                     settings_.jpegQuality = jpegQuality_;
                     if (hooks_.settingsChanged)
                         hooks_.settingsChanged();
@@ -506,58 +485,40 @@ void FileSession::drawModals() {
                     afterSave_ = {};
                 }
             }
-            ImGui::EndPopup();
+            modal::end();
         }
         break;
     }
 
     case Modal::Overwrite: {
-        centerNextWindow();
-        if (ImGui::BeginPopupModal(overwriteTitle().c_str(), nullptr, kModalFlags)) {
-            ImGui::TextUnformatted(trf(Str::FileAlreadyExists, {utf8FromPath(pendingSave_.path.filename())}).c_str());
-            ImGui::TextDisabled("%s", tr(Str::FileReplaceQuestion));
-            ImGui::Spacing();
+        if (modal::begin(overwriteTitle().c_str(), 24.0f)) {
+            modal::paragraph(trf(Str::FileAlreadyExists, {utf8FromPath(pendingSave_.path.filename())}).c_str());
+            modal::paragraph(tr(Str::FileReplaceQuestion), true);
 
-            bool replace = false;
-            bool cancel = escape;
-            if (ImGui::Button(tr(Str::WordReplace)))
-                replace = true;
-            ImGui::SameLine();
-            ImGui::SetItemDefaultFocus();
-            if (ImGui::Button(tr(Str::WordCancel)))
-                cancel = true;
-
-            if (replace || cancel) {
+            // Replacing is destructive, so Enter and Escape both keep the file.
+            const int pressed = modal::footer({{tr(Str::WordCancel), modal::ButtonKind::Secondary, true, true, true},
+                                               {tr(Str::WordReplace), modal::ButtonKind::Danger}});
+            if (pressed >= 0) {
                 ImGui::CloseCurrentPopup();
                 modal_ = Modal::None;
-                if (replace)
+                if (pressed == 1)
                     continueSave(pendingSave_);
                 else
                     afterSave_ = {};
             }
-            ImGui::EndPopup();
+            modal::end();
         }
         break;
     }
 
     case Modal::Message: {
-        centerNextWindow();
-        if (ImGui::BeginPopupModal((messageIsError_ ? errorTitle() : infoTitle()).c_str(), nullptr, kModalFlags)) {
-            ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28.0f);
-            if (messageIsError_)
-                ImGui::TextColored(tokens().warning, "%s", message_.c_str());
-            else
-                ImGui::TextUnformatted(message_.c_str());
-            ImGui::PopTextWrapPos();
-            ImGui::Spacing();
-
-            const bool ok = ImGui::Button(tr(Str::WordOk));
-            ImGui::SetItemDefaultFocus();
-            if (ok || escape) {
+        if (modal::begin((messageIsError_ ? errorTitle() : infoTitle()).c_str(), 24.0f)) {
+            modal::notice(message_.c_str(), messageIsError_);
+            if (modal::footer({{tr(Str::WordOk), modal::ButtonKind::Primary, true, true, true}}) >= 0) {
                 ImGui::CloseCurrentPopup();
                 modal_ = Modal::None;
             }
-            ImGui::EndPopup();
+            modal::end();
         }
         break;
     }

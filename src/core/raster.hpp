@@ -86,9 +86,11 @@ IRect drawLine(Image& img, int x0, int y0, int x1, int y1, const Paint& paint, b
 // Thick line with round caps: every pixel within `radius` of the segment a-b. Antialiased edges use
 // distance-based coverage. Without antialiasing the endpoints snap to pixel centers, so a radius of 0.5
 // paints exactly one pixel. Pass the stroke's mask to composite overlapping capsules as one shape; a mask
-// of the wrong size is ignored.
+// of the wrong size is ignored. `hardness` (0..1, antialiasing only) softens the edge: 1 is the usual one-pixel
+// edge, lower values fade the coverage over that part of the radius more, down to a brush that is solid only at
+// its center. Out-of-range values are clamped and a non-finite one counts as 1.
 IRect drawCapsule(Image& img, Vec2f a, Vec2f b, float radius, const Paint& paint, bool antialias,
-                  StrokeMask* mask = nullptr);
+                  StrokeMask* mask = nullptr, float hardness = 1.0f);
 
 // A `size` x `size` square stamped at every pixel of the line (x0, y0) - (x1, y1), as a hard-edged brush for
 // pixel art: the square covering pixel (x, y) spans x - size / 2 up to x - size / 2 + size - 1, so an odd
@@ -96,6 +98,10 @@ IRect drawCapsule(Image& img, Vec2f a, Vec2f b, float radius, const Paint& paint
 // on each pixel once; a mask of the wrong size is ignored. A size below 1 draws nothing.
 IRect stampSquareLine(Image& img, int x0, int y0, int x1, int y1, int size, const Paint& paint,
                       StrokeMask* mask = nullptr);
+
+// Paints every pixel of `rect` (clipped to the image) at full coverage, once per stroke when a mask is given.
+// stampSquareLine's stamp for one pixel is exactly this, so a mirrored stamp is stampRect of the mirrored rect.
+IRect stampRect(Image& img, const IRect& rect, const Paint& paint, StrokeMask* mask = nullptr);
 
 IRect fillRect(Image& img, const IRect& rect, const Paint& paint);
 
@@ -112,5 +118,12 @@ IRect strokeEllipse(Image& img, const IRect& box, int thickness, const Paint& pa
 // channel against the seed pixel) with `color`. With `contiguous` false every pixel of the image that is
 // within the tolerance of the seed is replaced, connected or not.
 IRect floodFill(Image& img, int x, int y, Rgba8 color, int tolerance, bool contiguous = true);
+
+// The smallest rectangle holding every pixel whose alpha is not 0; empty when the image is blank.
+IRect opaqueBounds(const Image& img);
+
+// Whether the region a contiguous floodFill from (x, y) would replace (same tolerance rule) reaches the image edge.
+// Writes nothing and stops at the first edge pixel. False when (x, y) is off the image.
+bool floodTouchesEdge(const Image& img, int x, int y, int tolerance);
 
 } // namespace trace

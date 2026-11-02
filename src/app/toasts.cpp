@@ -3,9 +3,11 @@
 #include <imgui.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <utility>
 
+#include "app/svg_icons.hpp"
 #include "app/theme.hpp"
 
 namespace trace {
@@ -37,6 +39,12 @@ void Toasts::push(std::string text, Kind kind) {
         toasts_.erase(toasts_.begin(), toasts_.end() - static_cast<std::ptrdiff_t>(kMaxVisible));
 }
 
+void Toasts::setCanvasRect(ImVec2 pos, ImVec2 size) {
+    canvasPos_ = pos;
+    canvasSize_ = size;
+    canvasFrame_ = ImGui::GetFrameCount();
+}
+
 void Toasts::draw() {
     if (toasts_.empty())
         return;
@@ -57,21 +65,31 @@ void Toasts::draw() {
     const ImVec2 pad(unit * 0.8f, unit * 0.55f);
     const float barWidth = unit * 0.3f;
     const float gap = unit * 0.5f;
-    const float wrap = std::max(unit * 10.0f, viewport->WorkSize.x * 0.4f);
 
-    float bottom = viewport->WorkPos.y + viewport->WorkSize.y - unit;
-    const float right = viewport->WorkPos.x + viewport->WorkSize.x - unit;
+    // The canvas window when one was reported this frame and has room, else the whole main window.
+    ImVec2 areaPos = viewport->WorkPos;
+    ImVec2 areaSize = viewport->WorkSize;
+    if (canvasFrame_ == ImGui::GetFrameCount() && canvasSize_.x > unit * 4.0f && canvasSize_.y > unit * 4.0f) {
+        areaPos = canvasPos_;
+        areaSize = canvasSize_;
+    }
+    const float centerX = areaPos.x + areaSize.x * 0.5f;
+    const float areaBottom = areaPos.y + areaSize.y;
+    const float wrap = std::max(unit * 10.0f, std::min(areaSize.x - unit * 2.0f, viewport->WorkSize.x * 0.4f));
 
-    // Newest at the bottom, older ones stacked above it.
+    // Below the top ruler (1.5 em tall) with a small margin; newest on top, older ones stacked beneath it.
+    float top = areaPos.y + unit * 2.2f;
+
     for (auto it = toasts_.rbegin(); it != toasts_.rend(); ++it) {
         const Toast& t = *it;
         const float remaining = static_cast<float>(t.expires - now);
         const float alpha = std::clamp(remaining / static_cast<float>(kFadeSeconds), 0.0f, 1.0f);
 
         const ImVec2 textSize = ImGui::CalcTextSize(t.text.c_str(), nullptr, false, wrap);
-        const ImVec2 size(textSize.x + pad.x * 2.0f + barWidth, textSize.y + pad.y * 2.0f);
-        const ImVec2 min(right - size.x, bottom - size.y);
-        const ImVec2 max(right, bottom);
+        const float iconWidth = std::round(unit) + gap; // the icon and the space behind it
+        const ImVec2 size(textSize.x + pad.x * 2.0f + barWidth + iconWidth, textSize.y + pad.y * 2.0f);
+        const ImVec2 min(std::round(centerX - size.x * 0.5f), top);
+        const ImVec2 max(min.x + size.x, top + size.y);
 
         const ImVec4 accent = t.kind == Kind::Error ? tk.warning : tk.accent;
         const ImVec4 background = ImGui::GetStyleColorVec4(ImGuiCol_PopupBg);
@@ -80,12 +98,15 @@ void Toasts::draw() {
         dl->AddRect(min, max, withAlpha(tk.canvasBorder, alpha), rounding);
         dl->AddRectFilled(min, ImVec2(min.x + barWidth, max.y), withAlpha(accent, alpha), rounding,
                           ImDrawFlags_RoundCornersLeft);
-        dl->AddText(nullptr, 0.0f, ImVec2(min.x + barWidth + pad.x, min.y + pad.y), withAlpha(tk.text, alpha),
+        drawIcon(dl, t.kind == Kind::Error ? Icon::Error : Icon::Info,
+                 ImVec2(min.x + barWidth + pad.x, min.y + pad.y + std::round((ImGui::GetTextLineHeight() - unit) * 0.5f)),
+                 std::round(unit), withAlpha(accent, alpha));
+        dl->AddText(nullptr, 0.0f, ImVec2(min.x + barWidth + pad.x + iconWidth, min.y + pad.y), withAlpha(tk.text, alpha),
                     t.text.c_str(), nullptr, wrap);
 
-        bottom = min.y - gap;
-        if (bottom < viewport->WorkPos.y)
-            break; // no room left above; the rest are still timed and will appear as space frees
+        top = max.y + gap;
+        if (top > areaBottom)
+            break; // no room left below; the rest are still timed and will appear as space frees
     }
 }
 

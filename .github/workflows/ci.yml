@@ -52,6 +52,12 @@ jobs:
         with:
           arch: x64
 
+      # msvc-dev-cmd exports VCPKG_ROOT pointing at the copy bundled with Visual Studio, which overrides the job
+      # setting above; clone into the workspace as intended.
+      - name: Reset VCPKG_ROOT
+        shell: bash
+        run: echo "VCPKG_ROOT=${{ github.workspace }}/vcpkg" >> "$GITHUB_ENV"
+
       - name: Restore vcpkg binary cache
         uses: actions/cache@v4
         with:

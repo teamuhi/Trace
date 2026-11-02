@@ -2,6 +2,7 @@
 
 #include <SDL3/SDL.h>
 #include <imgui.h>
+#include <imgui_internal.h>
 
 #include <algorithm>
 #include <array>
@@ -9,6 +10,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdarg>
+#include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <initializer_list>
@@ -19,11 +21,14 @@
 
 #include "io/path_utf8.hpp"
 
+#include "app/app_icon.hpp"
 #include "app/keybinds.hpp"
+#include "app/modal_ui.hpp"
 #include "app/languages.hpp"
 #include "app/native_dialogs.hpp"
 #include "app/theme_io.hpp"
 #include "app/pattern_draw.hpp"
+#include "app/panel_ui.hpp"
 #include "app/theme.hpp"
 #include "app/tool_icons.hpp"
 #include "core/action_text.hpp"
@@ -45,8 +50,9 @@ constexpr float kViewportFill = 0.9f; // never open larger than this share of th
 
 constexpr std::array<Str, kSettingsPageCount> kPageNames = {
     Str::SettingsPageGeneral,  Str::SettingsPageTheme,    Str::SettingsPageView,  Str::SettingsPageTools,
-    Str::SettingsPagePixelArt, Str::SettingsPageScripts,  Str::SettingsPageKeybinds, Str::SettingsPageAbout};
-constexpr std::array<const char*, 7> kGroups = {"File", "Edit", "Image", "View", "Tools", "Modes", "Pixel Art"};
+    Str::SettingsPagePixelArt, Str::SettingsPageFlowchart, Str::SettingsPageScripts, Str::SettingsPageKeybinds,
+    Str::SettingsPageAbout};
+constexpr std::array<const char*, 8> kGroups = {"File", "Edit", "Image", "View", "Tools", "Modes", "Pixel Art", "Flowchart"};
 constexpr std::array<int, 5> kScalePresets = {75, 100, 125, 150, 200};
 
 // Visible titles are translated; the part after ### keeps the window's and popup's identity (and so its saved
@@ -123,10 +129,28 @@ bool colorSwatch(float rgba[4], Rgba8& target, const ImVec4* original) {
 
 // Headings and hints --------------------------------------------------------------------------------------
 
-// A heading with a little air above it, so groups on a page do not run together.
+// A heading with air above it, so groups on a page do not run together: a short accent bar, the title and a rule
+// that runs to the right edge.
 void section(Str text) {
-    ImGui::Spacing();
-    ImGui::SeparatorText(tr(text));
+    const float em = ImGui::GetFontSize();
+    ImGui::Dummy(ImVec2(0.0f, std::round(em * 0.5f)));
+    const ThemeTokens& t = tokens();
+    const panel::Colors c = panel::colors();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 start = ImGui::GetCursorScreenPos();
+    const float right = start.x + ImGui::GetContentRegionAvail().x;
+    const float barWidth = std::max(2.0f, std::round(em * 0.22f));
+    const float lineHeight = ImGui::GetTextLineHeight();
+    dl->AddRectFilled(ImVec2(start.x, start.y + 1.0f), ImVec2(start.x + barWidth, start.y + lineHeight - 1.0f),
+                      ImGui::ColorConvertFloat4ToU32(t.accent), barWidth * 0.5f);
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + barWidth + std::round(em * 0.55f));
+    ImGui::TextUnformatted(tr(text));
+    const float from = ImGui::GetItemRectMax().x + std::round(em * 0.7f);
+    if (from < right - em * 0.5f) {
+        const float midY = std::round(start.y + lineHeight * 0.5f);
+        dl->AddLine(ImVec2(from, midY), ImVec2(right, midY), ImGui::ColorConvertFloat4ToU32(c.rule), 1.0f);
+    }
+    ImGui::Dummy(ImVec2(0.0f, std::round(em * 0.1f)));
 }
 
 // Muted help text that wraps at the right edge, so long lines and translations never run off the page. With
@@ -167,13 +191,114 @@ float roomRight() {
     return ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x - ImGui::GetItemRectMax().x;
 }
 
+// Form rows -----------------------------------------------------------------------------------------------
+// Every page lays its settings out the same way: a label column on the left, the control in a second column,
+// and any help text wrapped under the control. A checkbox carries its own label and its hint sits under the text.
+
+// Width of a page's label column: the widest label plus an em and a half, never more than 45% of the page.
+float labelColumn(std::initializer_list<const char*> labels) {
+    const float em = ImGui::GetFontSize();
+    float widest = 0.0f;
+    for (const char* label : labels)
+        widest = std::max(widest, ImGui::CalcTextSize(label).x);
+    return std::min(widest + em * 1.5f, std::max(em * 8.0f, ImGui::GetContentRegionAvail().x * 0.45f));
+}
+
+// The row's label, wrapped inside the label column, then the cursor moves to the control column.
+void fieldLabel(const char* text, float column) {
+    const float x = ImGui::GetCursorPosX();
+    ImGui::AlignTextToFramePadding();
+    ImGui::PushTextWrapPos(x + column - ImGui::GetFontSize() * 0.5f);
+    ImGui::TextUnformatted(text);
+    ImGui::PopTextWrapPos();
+    ImGui::SameLine(x + column);
+}
+
+// Help text under the control column.
+void fieldHint(const char* text, float column) {
+    ImGui::Indent(column);
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextDisabled("%s", text);
+    ImGui::PopTextWrapPos();
+    ImGui::Unindent(column);
+}
+
+// Help text under a checkbox's label.
+void checkHint(const char* text) {
+    const float indent = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x;
+    fieldHint(text, indent);
+}
+
+// A checkbox with an optional hint under it.
+bool checkField(Str label, bool& value, const char* hintText = nullptr) {
+    const bool changed = ImGui::Checkbox(tr(label), &value);
+    if (hintText)
+        checkHint(hintText);
+    return changed;
+}
+
+// A labelled combo: the label in the label column, then the combo `width` wide. Close with ImGui::EndCombo().
+bool beginComboField(const char* label, float column, const char* preview, float width) {
+    fieldLabel(label, column);
+    ImGui::SetNextItemWidth(width);
+    return ImGui::BeginCombo((std::string("##") + label).c_str(), preview);
+}
+
+// The number being typed into a numeric field. The text is only read back into the setting once the field loses
+// focus (Enter, Tab or a click elsewhere), so the value can pass through out-of-range numbers while typing (a
+// minimum of 16 would otherwise make "5" jump to 16 before the "12" is finished). Only one field is edited at a time.
+struct NumberDraft {
+    ImGuiID id = 0;
+    int* target = nullptr;
+    int lo = 0;
+    int hi = 0;
+    int value = 0;
+};
+NumberDraft g_draft;
+
+// Writes a finished draft into its setting, clamped to the field's range. True when the setting changed. Also
+// called at the top of every frame, so a field that stops being drawn (another page chosen, the window closed)
+// still gets its text applied.
+bool commitDraft() {
+    if (g_draft.id == 0 || ImGui::GetActiveID() == g_draft.id)
+        return false;
+    const int value = std::clamp(g_draft.value, g_draft.lo, g_draft.hi);
+    const bool changed = *g_draft.target != value;
+    *g_draft.target = value;
+    g_draft = NumberDraft{};
+    return changed;
+}
+
+// A labelled numeric text box: no slider and no +/- buttons, only the number, followed by its range and unit
+// ("1-16384 px"). `value` is clamped to lo..hi when the box is left.
+bool numberField(const char* label, float column, int& value, int lo, int hi, const char* unit = nullptr) {
+    fieldLabel(label, column);
+    ImGui::PushID(label);
+    const ImGuiID id = ImGui::GetID("##number");
+    int shown = g_draft.id == id ? g_draft.value : value;
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7.0f);
+    if (ImGui::InputInt("##number", &shown, 0, 0, ImGuiInputTextFlags_AutoSelectAll))
+        g_draft = NumberDraft{id, &value, lo, hi, shown};
+    bool changed = false;
+    if (g_draft.id == id)
+        changed = commitDraft(); // no-op while the box still has focus
+    ImGui::SameLine();
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextDisabled("%d-%d%s%s", lo, hi, unit ? " " : "", unit ? unit : "");
+    ImGui::PopID();
+    return changed;
+}
+
 // The label of token `index`, in the order of tokenInfos().
 Str tokenString(std::size_t index) {
     static constexpr Str kLabels[kTokenCount] = {
         Str::TokenAccent,        Str::TokenButton,      Str::TokenText,        Str::TokenWindowBg,
         Str::TokenStatusBarBg,   Str::TokenCanvasBackdrop, Str::TokenPattern,  Str::TokenCheckerA,
         Str::TokenCheckerB,      Str::TokenCanvasBorder, Str::TokenPixelGrid,  Str::TokenRulerBg,
-        Str::TokenRulerText,     Str::TokenGuide,       Str::TokenSelection,   Str::TokenWarning};
+        Str::TokenRulerText,     Str::TokenGuide,       Str::TokenSelection,   Str::TokenWarning,
+        Str::TokenSymmetryAxis,  Str::TokenTileDim,     Str::TokenOnionPrev,    Str::TokenOnionNext,
+        Str::TokenFlowBoard,     Str::TokenFlowGrid,    Str::TokenFlowHandle,   Str::TokenFlowInkAuto,
+        Str::TokenFlowPaperAuto};
     return kLabels[index < static_cast<std::size_t>(kTokenCount) ? index : 0];
 }
 
@@ -247,10 +372,12 @@ bool SettingsWindow::draw(Settings& settings, Toolbox& toolbox, const std::strin
                           LanguageManager& languages) {
     dialogs_ = &dialogs;
     languages_ = &languages;
+    // A number typed into a box that lost focus last frame (another page picked, window closed) is applied first.
+    const bool flushed = commitDraft();
     if (!open_) {
         endCapture(); // closed by the title bar button or File > Settings
         wasOpen_ = false;
-        return false;
+        return flushed;
     }
     if (!wasOpen_)
         languages.refresh(); // packs may have been added to the folder since the last time
@@ -267,7 +394,7 @@ bool SettingsWindow::draw(Settings& settings, Toolbox& toolbox, const std::strin
         focusRequested_ = false;
     }
 
-    bool changed = false;
+    bool changed = flushed;
     constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking;
     if (ImGui::Begin(settingsTitle().c_str(), &open_, flags)) {
         // Losing focus (alt-tab, clicking the canvas) abandons a pending key capture.
@@ -295,6 +422,8 @@ bool SettingsWindow::draw(Settings& settings, Toolbox& toolbox, const std::strin
         const bool pageVisible = ImGui::BeginChild("##page", ImVec2(0.0f, -footer), ImGuiChildFlags_Borders);
         ImGui::PopStyleVar(); // only the page itself; popups opened from it keep the normal padding
         if (pageVisible) {
+            if (settings.lastPage < kSettingsPageCount - 1)
+                drawPageHeader(settings.lastPage); // About has its own title block
             switch (settings.lastPage) {
             case 0:
                 changed |= drawGeneral(settings);
@@ -312,9 +441,12 @@ bool SettingsWindow::draw(Settings& settings, Toolbox& toolbox, const std::strin
                 changed |= drawPixelArt(settings);
                 break;
             case 5:
-                drawScripts();
+                changed |= drawFlowchart(settings);
                 break;
             case 6:
+                drawScripts();
+                break;
+            case 7:
                 changed |= drawKeybinds(settings);
                 break;
             default:
@@ -333,21 +465,22 @@ bool SettingsWindow::draw(Settings& settings, Toolbox& toolbox, const std::strin
         if (ImGui::Button(tr(Str::WordClose)))
             open_ = false;
 
-        ImGui::SetNextWindowPos(viewport->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-        if (ImGui::BeginPopupModal(restoreTitle().c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-            ImGui::TextUnformatted(tr(Str::SettingsRestoreQuestion));
-            if (ImGui::Button(tr(Str::SettingsRestore))) {
-                const int page = settings.lastPage;
-                settings = Settings::defaults();
-                settings.lastPage = page;
-                endCapture();
-                changed = true;
+        if (modal::begin(restoreTitle().c_str(), 22.0f)) {
+            modal::paragraph(tr(Str::SettingsRestoreQuestion));
+            // Resetting everything is not undoable, so Enter and Escape both keep the settings.
+            const int pressed = modal::footer({{tr(Str::WordCancel), modal::ButtonKind::Secondary, true, true, true},
+                                               {tr(Str::SettingsRestore), modal::ButtonKind::Danger}});
+            if (pressed >= 0) {
+                if (pressed == 1) {
+                    const int page = settings.lastPage;
+                    settings = Settings::defaults();
+                    settings.lastPage = page;
+                    endCapture();
+                    changed = true;
+                }
                 ImGui::CloseCurrentPopup();
             }
-            ImGui::SameLine();
-            if (ImGui::Button(tr(Str::WordCancel)))
-                ImGui::CloseCurrentPopup();
-            ImGui::EndPopup();
+            modal::end();
         }
         ImGui::PopStyleVar(3);
     }
@@ -363,22 +496,27 @@ bool SettingsWindow::draw(Settings& settings, Toolbox& toolbox, const std::strin
 // needs (so translations fit), within limits.
 bool SettingsWindow::drawCategories(Settings& settings, float footer) {
     const float em = ImGui::GetFontSize();
-    const float rowHeight = std::round(em * 2.1f);
-    const float iconSize = std::round(em * 1.15f);
-    const float pad = std::round(em * 0.8f);
-    const float gap = std::round(em * 0.6f);
+    const float rowHeight = std::round(em * 2.9f);
+    const float iconSize = std::round(em * 1.7f);
+    const float pad = std::round(em * 0.9f);
+    const float gap = std::round(em * 0.8f);
+    const float rounding = std::round(em * 0.35f);
     const float bar = std::max(2.0f, std::round(3.0f * uiScale()));
 
     float labelWidth = 0.0f;
     for (const Str name : kPageNames)
         labelWidth = std::max(labelWidth, ImGui::CalcTextSize(tr(name)).x);
     const float width = std::clamp(pad + iconSize + gap + labelWidth + pad + ImGui::GetStyle().WindowPadding.x * 2.0f,
-                                   em * 9.0f, em * 16.0f);
+                                   em * 11.0f, em * 18.0f);
 
     bool changed = false;
     if (ImGui::BeginChild("##categories", ImVec2(width, -footer), ImGuiChildFlags_Borders)) {
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const ThemeTokens& t = tokens();
+        // The row's look is drawn below (a rounded tile), so the Selectable paints nothing of its own.
+        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+        ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
         for (int i = 0; i < kSettingsPageCount; ++i) {
             const bool selected = settings.lastPage == i;
             ImGui::PushID(i);
@@ -397,8 +535,18 @@ bool SettingsWindow::drawCategories(Settings& settings, float footer) {
                 color.w *= 0.75f;
             const ImVec4 iconColor = selected ? t.accent : color;
 
-            if (selected)
-                dl->AddRectFilled(min, ImVec2(min.x + bar, max.y), ImGui::ColorConvertFloat4ToU32(t.accent));
+            if (selected) {
+                ImVec4 tile = t.accent;
+                tile.w *= 0.2f;
+                dl->AddRectFilled(min, max, ImGui::ColorConvertFloat4ToU32(tile), rounding);
+                const float inset = std::round(rowHeight * 0.22f);
+                dl->AddRectFilled(ImVec2(min.x, min.y + inset), ImVec2(min.x + bar, max.y - inset),
+                                  ImGui::ColorConvertFloat4ToU32(t.accent), bar * 0.5f);
+            } else if (hovered) {
+                ImVec4 tile = t.text;
+                tile.w *= 0.08f;
+                dl->AddRectFilled(min, max, ImGui::ColorConvertFloat4ToU32(tile), rounding);
+            }
             drawSettingsIcon(dl, i,
                              ImVec2(std::round(min.x + pad), std::round(min.y + (rowHeight - iconSize) * 0.5f)),
                              iconSize, ImGui::ColorConvertFloat4ToU32(iconColor));
@@ -409,36 +557,66 @@ bool SettingsWindow::drawCategories(Settings& settings, float footer) {
                         ImGui::ColorConvertFloat4ToU32(color), tr(kPageNames[static_cast<std::size_t>(i)]));
             dl->PopClipRect();
         }
+        ImGui::PopStyleColor(3);
     }
     ImGui::EndChild();
     return changed;
 }
 
+// The title of the page at its top: its icon on the accent, the name in larger type and a rule below.
+void SettingsWindow::drawPageHeader(int page) {
+    const float em = ImGui::GetFontSize();
+    const float iconSize = std::round(em * 1.9f);
+    const ImVec2 start = ImGui::GetCursorScreenPos();
+    const float right = start.x + ImGui::GetContentRegionAvail().x;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    drawSettingsIcon(dl, page, start, iconSize, ImGui::ColorConvertFloat4ToU32(tokens().accent));
+
+    ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 1.4f);
+    const float lineHeight = ImGui::GetTextLineHeight();
+    ImGui::SetCursorScreenPos(ImVec2(start.x + iconSize + std::round(em * 0.7f),
+                                     std::round(start.y + (iconSize - lineHeight) * 0.5f)));
+    ImGui::TextUnformatted(tr(kPageNames[static_cast<std::size_t>(page)]));
+    ImGui::PopFont();
+
+    const float ruleY = std::round(start.y + iconSize + em * 0.5f);
+    dl->AddLine(ImVec2(start.x, ruleY), ImVec2(right, ruleY),
+                ImGui::ColorConvertFloat4ToU32(panel::colors().rule), 1.0f);
+    ImGui::SetCursorScreenPos(ImVec2(start.x, ruleY + 1.0f));
+    ImGui::Dummy(ImVec2(0.0f, std::round(em * 0.2f)));
+}
+
 bool SettingsWindow::drawGeneral(Settings& s) {
     bool changed = false;
     const float em = ImGui::GetFontSize();
-    char preview[16];
-    if (s.uiScalePercent == 0)
-        std::snprintf(preview, sizeof(preview), "%s", tr(Str::WordAuto));
-    else
-        std::snprintf(preview, sizeof(preview), "%d%%", s.uiScalePercent);
-    ImGui::SetNextItemWidth(fitWidth({tr(Str::WordAuto), "200%"}, em * 10.0f));
-    if (ImGui::BeginCombo(tr(Str::GeneralInterfaceScale), preview)) {
-        if (ImGui::Selectable(tr(Str::WordAuto), s.uiScalePercent == 0)) {
-            s.uiScalePercent = 0;
-            changed = true;
-        }
-        for (const int percent : kScalePresets) {
-            char label[16];
-            std::snprintf(label, sizeof(label), "%d%%", percent);
-            if (ImGui::Selectable(label, s.uiScalePercent == percent)) {
-                s.uiScalePercent = percent;
+    const float column = labelColumn({tr(Str::GeneralInterfaceScale), tr(Str::GeneralInterfaceFont), tr(Str::GeneralFontSize),
+                                      tr(Str::GeneralLanguageLabel), tr(Str::WordWidthPx), tr(Str::WordHeightPx),
+                                      tr(Str::GeneralMemoryLimit)});
+
+    section(Str::ThemeGroupInterface);
+    {
+        char preview[16];
+        if (s.uiScalePercent == 0)
+            std::snprintf(preview, sizeof(preview), "%s", tr(Str::WordAuto));
+        else
+            std::snprintf(preview, sizeof(preview), "%d%%", s.uiScalePercent);
+        if (beginComboField(tr(Str::GeneralInterfaceScale), column, preview, fitWidth({tr(Str::WordAuto), "200%"}, em * 10.0f))) {
+            if (ImGui::Selectable(tr(Str::WordAuto), s.uiScalePercent == 0)) {
+                s.uiScalePercent = 0;
                 changed = true;
             }
+            for (const int percent : kScalePresets) {
+                char label[16];
+                std::snprintf(label, sizeof(label), "%d%%", percent);
+                if (ImGui::Selectable(label, s.uiScalePercent == percent)) {
+                    s.uiScalePercent = percent;
+                    changed = true;
+                }
+            }
+            ImGui::EndCombo();
         }
-        ImGui::EndCombo();
+        fieldHint(tr(Str::GeneralScaleHint), column);
     }
-    hint(tr(Str::GeneralScaleHint), true);
 
     section(Str::GeneralFont);
     {
@@ -462,8 +640,8 @@ bool SettingsWindow::drawGeneral(Settings& s) {
         };
 
         const float fontComboWidth = fitWidth({classicLabel, "Inter", "JetBrains Mono", customLabel.c_str()}, em * 14.0f);
-        ImGui::SetNextItemWidth(std::min(fontComboWidth, std::max(em * 14.0f, ImGui::GetContentRegionAvail().x * 0.55f)));
-        if (ImGui::BeginCombo(tr(Str::GeneralInterfaceFont), label(static_cast<int>(s.font)))) {
+        if (beginComboField(tr(Str::GeneralInterfaceFont), column, label(static_cast<int>(s.font)),
+                            std::min(fontComboWidth, std::max(em * 14.0f, ImGui::GetContentRegionAvail().x - column - em * 8.0f)))) {
             for (int i = 0; i < kFontChoiceCount; ++i) {
                 const bool isCustom = i == static_cast<int>(FontChoice::Custom);
                 if (isCustom && s.customFontPath.empty())
@@ -481,11 +659,9 @@ bool SettingsWindow::drawGeneral(Settings& s) {
             dialogs_->open(NativeDialogs::Tag::FontFile);
         ImGui::EndDisabled();
 
-        ImGui::SetNextItemWidth(em * 12.0f);
-        changed |= ImGui::SliderInt(tr(Str::GeneralFontSize), &s.fontSize, kMinFontSize, kMaxFontSize, "%d px",
-                                    ImGuiSliderFlags_AlwaysClamp);
-        hint(tr(Str::GeneralFontSample));
-        hint(tr(Str::GeneralFontHint));
+        changed |= numberField(tr(Str::GeneralFontSize), column, s.fontSize, kMinFontSize, kMaxFontSize, "px");
+        fieldHint(tr(Str::GeneralFontSample), column);
+        fieldHint(tr(Str::GeneralFontHint), column);
     }
 
     section(Str::GeneralLanguage);
@@ -506,8 +682,7 @@ bool SettingsWindow::drawGeneral(Settings& s) {
         std::vector<const char*> widths = {tr(Str::GeneralLanguageEnglish), current.c_str()};
         for (const std::string& label : labels)
             widths.push_back(label.c_str());
-        ImGui::SetNextItemWidth(fitWidth(widths, em * 14.0f));
-        if (ImGui::BeginCombo(tr(Str::GeneralLanguageLabel), current.c_str())) {
+        if (beginComboField(tr(Str::GeneralLanguageLabel), column, current.c_str(), fitWidth(widths, em * 14.0f))) {
             if (ImGui::Selectable(tr(Str::GeneralLanguageEnglish), s.language.empty())) {
                 s.language.clear();
                 changed = true;
@@ -520,6 +695,7 @@ bool SettingsWindow::drawGeneral(Settings& s) {
             }
             ImGui::EndCombo();
         }
+        ImGui::Indent(column);
         ImGui::BeginDisabled(dialogs_ == nullptr || dialogs_->busy());
         if (ImGui::Button(tr(Str::GeneralImportLanguage)) && dialogs_)
             dialogs_->open(NativeDialogs::Tag::LanguageImport);
@@ -527,29 +703,25 @@ bool SettingsWindow::drawGeneral(Settings& s) {
         if (ImGui::Button(tr(Str::GeneralExportTemplate)) && dialogs_)
             dialogs_->save(NativeDialogs::Tag::LanguageTemplate, "trace-language-template.ini");
         ImGui::EndDisabled();
+        ImGui::Unindent(column);
 
         if (const LanguagePack* active = languages_->active()) {
             if (!active->info.author.empty())
-                hint(trf(Str::GeneralLanguageAuthor, {active->info.author}).c_str());
-            hint(trf(Str::GeneralLanguageCoverage, {std::to_string(active->translated), std::to_string(kStrCount)}).c_str());
+                fieldHint(trf(Str::GeneralLanguageAuthor, {active->info.author}).c_str(), column);
+            fieldHint(trf(Str::GeneralLanguageCoverage, {std::to_string(active->translated), std::to_string(kStrCount)}).c_str(),
+                      column);
         }
-        hint(tr(Str::GeneralLanguageHint));
+        fieldHint(tr(Str::GeneralLanguageHint), column);
     }
 
     section(Str::GeneralNewCanvas);
-    ImGui::SetNextItemWidth(em * 10.0f);
-    changed |= ImGui::InputInt(tr(Str::WordWidthPx), &s.newWidth, 10, 100);
-    ImGui::SetNextItemWidth(em * 10.0f);
-    changed |= ImGui::InputInt(tr(Str::WordHeightPx), &s.newHeight, 10, 100);
-    s.newWidth = std::clamp(s.newWidth, kMinCanvasSize, kMaxCanvasSize);
-    s.newHeight = std::clamp(s.newHeight, kMinCanvasSize, kMaxCanvasSize);
-    hint(trf(Str::GeneralNewCanvasHint, {std::to_string(kMinCanvasSize), std::to_string(kMaxCanvasSize)}).c_str());
+    changed |= numberField(tr(Str::WordWidthPx), column, s.newWidth, kMinCanvasSize, kMaxCanvasSize);
+    changed |= numberField(tr(Str::WordHeightPx), column, s.newHeight, kMinCanvasSize, kMaxCanvasSize);
+    fieldHint(trf(Str::GeneralNewCanvasHint, {std::to_string(kMinCanvasSize), std::to_string(kMaxCanvasSize)}).c_str(), column);
 
     section(Str::GeneralUndoHistory);
-    ImGui::SetNextItemWidth(em * 10.0f);
-    changed |= ImGui::InputInt(tr(Str::GeneralMemoryLimit), &s.historyLimitMb, 64, 256);
-    s.historyLimitMb = std::clamp(s.historyLimitMb, kMinHistoryLimitMb, kMaxHistoryLimitMb);
-    hint(tr(Str::GeneralHistoryHint));
+    changed |= numberField(tr(Str::GeneralMemoryLimit), column, s.historyLimitMb, kMinHistoryLimitMb, kMaxHistoryLimitMb);
+    fieldHint(tr(Str::GeneralHistoryHint), column);
     return changed;
 }
 
@@ -585,11 +757,14 @@ struct TokenGroup {
 
 constexpr int kInterfaceTokens[] = {0, 1, 2, 3, 4, 15}; // accent, buttons, text, window, bars, warning
 constexpr int kCanvasTokens[] = {5, 6, 7, 8, 9, 10};     // backdrop, pattern, checker A and B, border, pixel grid
-constexpr int kOverlayTokens[] = {11, 12, 13, 14};       // ruler background and text, guides, selection
+constexpr int kOverlayTokens[] = {11, 12, 13, 14, 16, 17, 18, 19}; // ruler background and text, guides, selection, mirror axes, tile fade, onion skin
 
-constexpr std::array<TokenGroup, 3> kTokenGroups = {{{Str::ThemeGroupInterface, kInterfaceTokens},
+constexpr int kFlowTokens[] = {20, 21, 22, 23, 24}; // board, grid, handles, automatic ink and paper
+
+constexpr std::array<TokenGroup, 4> kTokenGroups = {{{Str::ThemeGroupInterface, kInterfaceTokens},
                                                      {Str::ThemeGroupCanvas, kCanvasTokens},
-                                                     {Str::ThemeGroupOverlays, kOverlayTokens}}};
+                                                     {Str::ThemeGroupOverlays, kOverlayTokens},
+                                                     {Str::ThemeGroupFlowchart, kFlowTokens}}};
 
 constexpr bool groupsCoverEveryToken() {
     unsigned seen = 0;
@@ -674,8 +849,9 @@ bool SettingsWindow::drawTheme(Settings& s) {
     const std::span<const TokenInfo> infos = tokenInfos();
 
     static constexpr Str kModeLabels[] = {Str::WordSystem, Str::WordLight, Str::WordDark};
-    ImGui::SetNextItemWidth(fitWidth({tr(kModeLabels[0]), tr(kModeLabels[1]), tr(kModeLabels[2])}, em * 10.0f));
-    if (ImGui::BeginCombo(tr(Str::ThemeAppearance), tr(kModeLabels[static_cast<int>(s.theme)]))) {
+    const float column = labelColumn({tr(Str::ThemeAppearance)});
+    if (beginComboField(tr(Str::ThemeAppearance), column, tr(kModeLabels[static_cast<int>(s.theme)]),
+                        fitWidth({tr(kModeLabels[0]), tr(kModeLabels[1]), tr(kModeLabels[2])}, em * 10.0f))) {
         for (int i = 0; i < 3; ++i) {
             if (ImGui::Selectable(tr(kModeLabels[i]), static_cast<int>(s.theme) == i)) {
                 s.theme = static_cast<ThemeMode>(i);
@@ -685,7 +861,7 @@ bool SettingsWindow::drawTheme(Settings& s) {
         }
         ImGui::EndCombo();
     }
-    hint(tr(Str::ThemeSystemHint), true);
+    fieldHint(tr(Str::ThemeSystemHint), column);
 
     // Accent presets recolor both palettes at once. The one matching the accent being edited gets a ring.
     section(Str::ThemeAccentColor);
@@ -741,13 +917,14 @@ bool SettingsWindow::drawTheme(Settings& s) {
         ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
         if (segment(Str::WordLight, !editDark_))
             editDark_ = false;
+
+        // Import and export share the row when there is room, else they wrap under it.
+        const float gap = ImGui::GetFontSize() * 1.5f;
+        const float buttons = buttonWidth(tr(Str::ThemeImport)) + buttonWidth(tr(Str::ThemeExport)) + ImGui::GetStyle().ItemSpacing.x;
+        if (roomRight() >= buttons + gap)
+            ImGui::SameLine(0.0f, gap);
     }
 
-    // A live strip drawn with the palette being edited, whichever one is applied right now.
-    const ThemeTokens preview = resolveTokens(editDark_, s.themeOverrides);
-    drawThemePreview(preview);
-
-    ImGui::Spacing();
     ImGui::BeginDisabled(dialogs_ == nullptr || dialogs_->busy());
     if (ImGui::Button(tr(Str::ThemeImport)) && dialogs_)
         dialogs_->open(NativeDialogs::Tag::ThemeImport);
@@ -756,6 +933,11 @@ bool SettingsWindow::drawTheme(Settings& s) {
         dialogs_->save(NativeDialogs::Tag::ThemeExport, "trace-theme.ini");
     ImGui::EndDisabled();
     ImGui::SetItemTooltip("%s", tr(Str::ThemeExportTip));
+
+    // A live strip drawn with the palette being edited, whichever one is applied right now.
+    ImGui::Spacing();
+    const ThemeTokens preview = resolveTokens(editDark_, s.themeOverrides);
+    drawThemePreview(preview);
 
     auto& overrides = s.themeOverrides.side(editDark_);
     const ThemeTokens& base = baseTokens(editDark_);
@@ -841,9 +1023,9 @@ namespace {
 constexpr Str kPatternLabels[kPatternStyleCount] = {Str::PatternSolid, Str::PatternChecker,  Str::PatternGrid,
                                                     Str::PatternDots,  Str::PatternDiagonal, Str::PatternCross};
 
-// A combo of pattern styles with a small preview of the chosen one, drawn with the real pattern code and
+// A labelled combo of pattern styles with a small preview of the chosen one, drawn with the real pattern code and
 // the colors of the applied theme.
-bool patternCombo(Str labelText, PatternStyle& style, bool transparency, const Settings& s) {
+bool patternCombo(Str labelText, float column, PatternStyle& style, bool transparency, const Settings& s) {
     bool changed = false;
     const float swatch = ImGui::GetFrameHeight();
     const ThemeTokens& t = tokens();
@@ -852,6 +1034,7 @@ bool patternCombo(Str labelText, PatternStyle& style, bool transparency, const S
     const ImU32 marks = col(transparency ? t.checkerB : t.pattern);
 
     ImGui::PushID(stringKey(labelText));
+    fieldLabel(tr(labelText), column);
     const ImVec2 min = ImGui::GetCursorScreenPos();
     ImGui::Dummy(ImVec2(swatch, swatch));
     drawPattern(ImGui::GetWindowDrawList(), style, min, ImVec2(min.x + swatch, min.y + swatch), min,
@@ -862,7 +1045,7 @@ bool patternCombo(Str labelText, PatternStyle& style, bool transparency, const S
     for (int i = 0; i < kPatternStyleCount; ++i)
         labels[static_cast<std::size_t>(i)] = tr(kPatternLabels[i]);
     ImGui::SetNextItemWidth(fitWidth(labels, ImGui::GetFontSize() * 12.0f));
-    if (ImGui::BeginCombo(tr(labelText), tr(kPatternLabels[static_cast<int>(style)]))) {
+    if (ImGui::BeginCombo("##style", tr(kPatternLabels[static_cast<int>(style)]))) {
         for (int i = 0; i < kPatternStyleCount; ++i) {
             if (ImGui::Selectable(tr(kPatternLabels[i]), static_cast<int>(style) == i)) {
                 style = static_cast<PatternStyle>(i);
@@ -879,28 +1062,51 @@ bool patternCombo(Str labelText, PatternStyle& style, bool transparency, const S
 
 bool SettingsWindow::drawView(Settings& s) {
     bool changed = false;
-    changed |= ImGui::Checkbox(tr(Str::ViewPixelGrid), &s.pixelGrid);
-    changed |= ImGui::Checkbox(tr(Str::ViewRulers), &s.showRulers);
-    changed |= ImGui::Checkbox(tr(Str::ViewGuides), &s.showGuides);
-    ImGui::BeginDisabled(!s.showGuides);
-    changed |= ImGui::Checkbox(tr(Str::ViewSnapToGuides), &s.snapToGuides);
-    ImGui::EndDisabled();
-    changed |= ImGui::Checkbox(tr(Str::ViewToolsPanel), &s.showToolsPanel);
-    changed |= ImGui::Checkbox(tr(Str::ViewStatusBar), &s.showStatusBar);
+    const float em = ImGui::GetFontSize();
+    const float column = labelColumn({tr(Str::ViewBehindImage), tr(Str::ViewBehindTransparent), tr(Str::ViewPatternSpacing)});
+
+    section(Str::ViewSectionPanels);
+    changed |= checkField(Str::ViewToolsPanel, s.showToolsPanel);
+    changed |= checkField(Str::ViewLayersPanel, s.showLayersPanel);
+    changed |= checkField(Str::ViewStatusBar, s.showStatusBar);
+    ImGui::Indent(em * 1.5f);
     ImGui::BeginDisabled(!s.showStatusBar);
-    changed |= ImGui::Checkbox(tr(Str::ViewSysStats), &s.showSysStats);
+    changed |= checkField(Str::ViewSysStats, s.showSysStats);
     ImGui::EndDisabled();
+    ImGui::Unindent(em * 1.5f);
+
+    // Puts every mode's windows back where they started and shows the ones closed with their X.
+    ImGui::Spacing();
+    if (ImGui::Button(tr(Str::ViewResetLayout)))
+        resetLayoutRequested_ = true;
+    hint(tr(Str::ViewResetLayoutHint), true);
+
+    section(Str::ViewSectionAids);
+    changed |= checkField(Str::ViewPixelGrid, s.pixelGrid);
+    changed |= checkField(Str::ViewRulers, s.showRulers);
+    changed |= checkField(Str::ViewGuides, s.showGuides);
+    ImGui::Indent(em * 1.5f);
+    ImGui::BeginDisabled(!s.showGuides);
+    changed |= checkField(Str::ViewSnapToGuides, s.snapToGuides);
+    ImGui::EndDisabled();
+    ImGui::Unindent(em * 1.5f);
 
     section(Str::ViewBackgrounds);
-    changed |= patternCombo(Str::ViewBehindImage, s.backdropPattern, false, s);
-    changed |= patternCombo(Str::ViewBehindTransparent, s.transparencyPattern, true, s);
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
-    changed |= ImGui::SliderInt(tr(Str::ViewPatternSpacing), &s.patternSpacing, kMinPatternSpacing, kMaxPatternSpacing, "%d px",
-                                ImGuiSliderFlags_AlwaysClamp);
+    changed |= patternCombo(Str::ViewBehindImage, column, s.backdropPattern, false, s);
+    changed |= patternCombo(Str::ViewBehindTransparent, column, s.transparencyPattern, true, s);
+    changed |= numberField(tr(Str::ViewPatternSpacing), column, s.patternSpacing, kMinPatternSpacing, kMaxPatternSpacing, "px");
+
+    section(Str::ViewWhiteboards);
+    int paper = s.whiteboardDark ? 1 : 0;
+    changed |= ImGui::RadioButton(tr(Str::WordWhite), &paper, 0);
+    ImGui::SameLine(0.0f, em * 1.5f);
+    changed |= ImGui::RadioButton(tr(Str::WordBlack), &paper, 1);
+    s.whiteboardDark = paper == 1;
 
     section(Str::ViewNewCanvasOpensAt);
     int zoom = static_cast<int>(s.newDocZoom);
     changed |= ImGui::RadioButton(tr(Str::ViewFitToWindow), &zoom, static_cast<int>(Settings::NewDocZoom::Fit));
+    ImGui::SameLine(0.0f, em * 1.5f);
     changed |= ImGui::RadioButton("100%", &zoom, static_cast<int>(Settings::NewDocZoom::ActualSize));
     s.newDocZoom = static_cast<Settings::NewDocZoom>(zoom);
     return changed;
@@ -908,14 +1114,18 @@ bool SettingsWindow::drawView(Settings& s) {
 
 bool SettingsWindow::drawTools(Settings& s, Toolbox& toolbox) {
     bool changed = false;
-    changed |= ImGui::Checkbox(tr(Str::ToolsRestoreLast), &s.restoreLastToolSettings);
-    hint(tr(Str::ToolsRestoreHint));
+    const float em = ImGui::GetFontSize();
+    ToolSettings& t = s.toolDefaults;
+    const float column = labelColumn({tr(Str::ToolsStartTool), tr(Str::ToolsBrushSize), tr(Str::ToolsStrokeWidth),
+                                      tr(Str::ToolsShapeMode), tr(Str::ToolsFillTolerance), tr(Str::ToolsTextSize)});
 
+    section(Str::ToolsSectionStartup);
+    changed |= checkField(Str::ToolsRestoreLast, s.restoreLastToolSettings, tr(Str::ToolsRestoreHint));
+    ImGui::Spacing();
     std::array<const char*, kToolCount> toolLabels{};
     for (int i = 0; i < kToolCount; ++i)
         toolLabels[static_cast<std::size_t>(i)] = tr(toolString(static_cast<ToolId>(i)));
-    ImGui::SetNextItemWidth(fitWidth(toolLabels, ImGui::GetFontSize() * 10.0f));
-    if (ImGui::BeginCombo(tr(Str::ToolsStartTool), tr(toolString(s.startTool)))) {
+    if (beginComboField(tr(Str::ToolsStartTool), column, tr(toolString(s.startTool)), fitWidth(toolLabels, em * 10.0f))) {
         for (int i = 0; i < kToolCount; ++i) {
             const ToolId id = static_cast<ToolId>(i);
             if (ImGui::Selectable(tr(toolString(id)), s.startTool == id)) {
@@ -926,23 +1136,16 @@ bool SettingsWindow::drawTools(Settings& s, Toolbox& toolbox) {
         ImGui::EndCombo();
     }
 
-    section(Str::ToolsStartingValues);
+    // The values below only matter while the last session's settings are not restored.
     ImGui::BeginDisabled(s.restoreLastToolSettings);
-    ToolSettings& t = s.toolDefaults;
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
-    changed |= ImGui::SliderInt(tr(Str::ToolsBrushSize), &t.brushSize, ToolSettings::kMinSize, ToolSettings::kMaxSize, "%d px",
-                                ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
-    changed |= ImGui::SliderInt(tr(Str::ToolsStrokeWidth), &t.strokeWidth, ToolSettings::kMinSize,
-                                ToolSettings::kMaxStrokeWidth, "%d px", ImGuiSliderFlags_AlwaysClamp);
-    changed |= ImGui::Checkbox(tr(Str::WordAntialias), &t.antialias);
-    changed |= ImGui::Checkbox(tr(Str::ToolsEraserTransparent), &t.eraseToTransparent);
-
+    section(Str::ToolsSectionBrush);
+    changed |= numberField(tr(Str::ToolsBrushSize), column, t.brushSize, ToolSettings::kMinSize, ToolSettings::kMaxSize, "px");
+    changed |= numberField(tr(Str::ToolsStrokeWidth), column, t.strokeWidth, ToolSettings::kMinSize,
+                           ToolSettings::kMaxStrokeWidth, "px");
     int mode = static_cast<int>(t.shapeMode);
     static constexpr Str kShapeLabels[] = {Str::WordOutline, Str::WordFilled, Str::WordOutlineAndFill};
-    ImGui::SetNextItemWidth(
-        fitWidth({tr(kShapeLabels[0]), tr(kShapeLabels[1]), tr(kShapeLabels[2])}, ImGui::GetFontSize() * 10.0f));
-    if (ImGui::BeginCombo(tr(Str::ToolsShapeMode), tr(kShapeLabels[mode]))) {
+    if (beginComboField(tr(Str::ToolsShapeMode), column, tr(kShapeLabels[mode]),
+                        fitWidth({tr(kShapeLabels[0]), tr(kShapeLabels[1]), tr(kShapeLabels[2])}, em * 10.0f))) {
         for (int i = 0; i < 3; ++i) {
             if (ImGui::Selectable(tr(kShapeLabels[i]), mode == i)) {
                 t.shapeMode = static_cast<ShapeMode>(i);
@@ -951,9 +1154,14 @@ bool SettingsWindow::drawTools(Settings& s, Toolbox& toolbox) {
         }
         ImGui::EndCombo();
     }
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
-    changed |= ImGui::SliderInt(tr(Str::ToolsFillTolerance), &t.fillTolerance, 0, 255, "%d", ImGuiSliderFlags_AlwaysClamp);
+    changed |= checkField(Str::WordAntialias, t.antialias);
+    changed |= checkField(Str::ToolsEraserTransparent, t.eraseToTransparent);
 
+    section(Str::ToolsSectionFill);
+    changed |= numberField(tr(Str::ToolsFillTolerance), column, t.fillTolerance, 0, 255);
+    changed |= numberField(tr(Str::ToolsTextSize), column, t.textSize, ToolSettings::kMinTextSize, ToolSettings::kMaxTextSize, "px");
+
+    section(Str::ToolsSectionColors);
     const auto colorRow = [&](Str name, float rgba[4], Rgba8& target) {
         ImGui::PushID(stringKey(name));
         const bool edited = colorSwatch(rgba, target, nullptr);
@@ -966,6 +1174,7 @@ bool SettingsWindow::drawTools(Settings& s, Toolbox& toolbox) {
     changed |= colorRow(Str::WordPrimaryColor, primary_, t.primary);
     changed |= colorRow(Str::WordSecondaryColor, secondary_, t.secondary);
 
+    section(Str::ToolsStartingValues);
     if (ImGui::Button(tr(Str::ToolsUseCurrent))) {
         t = toolbox.settings();
         changed = true;
@@ -982,23 +1191,75 @@ bool SettingsWindow::drawTools(Settings& s, Toolbox& toolbox) {
 bool SettingsWindow::drawPixelArt(Settings& s) {
     bool changed = false;
     PixelSettings& px = s.pixel;
+    const float column = labelColumn({tr(Str::WordWidthPx), tr(Str::WordHeightPx), tr(Str::PixelGridFrom), tr(Str::PixelTileDim),
+                                      tr(Str::PixelOnionBefore), tr(Str::PixelOnionAfter), tr(Str::PixelOnionOpacity)});
 
     section(Str::GeneralNewCanvas);
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
-    changed |= ImGui::SliderInt(tr(Str::WordWidthPx), &px.newWidth, 1, kMaxPixelCanvasSide, "%d px", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
-    changed |= ImGui::SliderInt(tr(Str::WordHeightPx), &px.newHeight, 1, kMaxPixelCanvasSide, "%d px", ImGuiSliderFlags_AlwaysClamp);
-    hint(trf(Str::GeneralNewCanvasHint, {"1", std::to_string(kMaxPixelCanvasSide)}).c_str());
+    changed |= numberField(tr(Str::WordWidthPx), column, px.newWidth, 1, kMaxPixelCanvasSide);
+    changed |= numberField(tr(Str::WordHeightPx), column, px.newHeight, 1, kMaxPixelCanvasSide);
+    fieldHint(trf(Str::GeneralNewCanvasHint, {"1", std::to_string(kMaxPixelCanvasSide)}).c_str(), column);
 
     section(Str::PixelSectionGrid);
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
-    changed |= ImGui::SliderInt(tr(Str::PixelGridFrom), &px.gridZoomPercent, kMinPixelGridZoomPercent,
-                                kMaxPixelGridZoomPercent, "%d%%", ImGuiSliderFlags_AlwaysClamp);
-    hint(tr(Str::PixelGridHint));
+    changed |= numberField(tr(Str::PixelGridFrom), column, px.gridZoomPercent, kMinPixelGridZoomPercent, kMaxPixelGridZoomPercent, "%");
+    fieldHint(tr(Str::PixelGridHint), column);
 
     section(Str::PixelSectionDrawing);
-    changed |= ImGui::Checkbox(tr(Str::PixelPerfectDefault), &px.pixelPerfectDefault);
-    hint(tr(Str::PixelPerfectHint));
+    changed |= checkField(Str::PixelPerfectDefault, px.pixelPerfectDefault, tr(Str::PixelPerfectHint));
+
+    section(Str::PixelSectionTile);
+    changed |= numberField(tr(Str::PixelTileDim), column, px.tileDimPercent, 0, 100, "%");
+    fieldHint(tr(Str::PixelTileHint), column);
+
+    section(Str::PixelSectionOnion);
+    changed |= numberField(tr(Str::PixelOnionBefore), column, px.onionBefore, 0, kMaxOnionFrames);
+    changed |= numberField(tr(Str::PixelOnionAfter), column, px.onionAfter, 0, kMaxOnionFrames);
+    changed |= numberField(tr(Str::PixelOnionOpacity), column, px.onionOpacityPercent, kMinOnionOpacityPercent, 100, "%");
+    changed |= checkField(Str::PixelOnionLoop, px.onionLoop);
+    fieldHint(tr(Str::PixelOnionHint), column);
+    return changed;
+}
+
+bool SettingsWindow::drawFlowchart(Settings& s) {
+    bool changed = false;
+    FlowSettings& fs = s.flow;
+    const float em = ImGui::GetFontSize();
+    const float column = labelColumn({tr(Str::FlowSettingsGridSize), tr(Str::FlowPropRoute), tr(Str::FlowPropStartArrow),
+                                      tr(Str::FlowPropEndArrow)});
+
+    section(Str::FlowSettingsBoard);
+    changed |= numberField(tr(Str::FlowSettingsGridSize), column, fs.gridSize, kMinFlowGridSize, kMaxFlowGridSize);
+    fieldHint(tr(Str::FlowSettingsGridHint), column);
+    ImGui::Spacing();
+    changed |= checkField(Str::MenuFlowShowGrid, fs.showGrid);
+    changed |= checkField(Str::MenuFlowSnapToGrid, fs.snapToGrid);
+    changed |= checkField(Str::MenuFlowSmartGuides, fs.smartGuides);
+    hint(tr(Str::FlowSettingsAidsHint));
+
+    section(Str::FlowPropNewConnectors);
+    static constexpr std::array<Str, 3> kRoutes = {Str::FlowRouteCurved, Str::FlowRouteElbow, Str::FlowRouteStraight};
+    static constexpr std::array<Str, 4> kArrows = {Str::FlowArrowNone, Str::FlowArrowArrow, Str::FlowArrowOpen,
+                                                   Str::FlowArrowDot};
+    const auto combo = [&](Str label, auto& value, const auto& names) {
+        const int count = static_cast<int>(names.size());
+        const int index = std::clamp(static_cast<int>(value), 0, count - 1);
+        std::array<const char*, 4> shown{};
+        for (int i = 0; i < count; ++i)
+            shown[static_cast<std::size_t>(i)] = tr(names[static_cast<std::size_t>(i)]);
+        const float width = fitWidth(std::span<const char* const>(shown.data(), static_cast<std::size_t>(count)), em * 12.0f);
+        if (beginComboField(tr(label), column, shown[static_cast<std::size_t>(index)], width)) {
+            for (int i = 0; i < count; ++i) {
+                if (ImGui::Selectable(shown[static_cast<std::size_t>(i)], i == index)) {
+                    value = static_cast<std::remove_reference_t<decltype(value)>>(i);
+                    changed = true;
+                }
+            }
+            ImGui::EndCombo();
+        }
+    };
+    combo(Str::FlowPropRoute, fs.defaultRoute, kRoutes);
+    combo(Str::FlowPropStartArrow, fs.defaultArrowStart, kArrows);
+    combo(Str::FlowPropEndArrow, fs.defaultArrowEnd, kArrows);
+    fieldHint(tr(Str::FlowSettingsConnectorHint), column);
     return changed;
 }
 
@@ -1190,8 +1451,19 @@ bool SettingsWindow::drawKeybinds(Settings& s) {
 }
 
 void SettingsWindow::drawAbout(const std::string& settingsPath) {
+    // The app icon beside the name and tagline. Without a texture (no renderer, decode failure) the text stands alone.
+    const float iconSide = std::round(ImGui::GetFontSize() * 4.0f);
+    SDL_Texture* iconTexture = appIconTexture();
+    if (iconTexture) {
+        ImGui::Image(static_cast<ImTextureID>(reinterpret_cast<std::intptr_t>(iconTexture)), ImVec2(iconSide, iconSide));
+        ImGui::SameLine();
+    }
+    ImGui::BeginGroup();
+    ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 1.5f);
     ImGui::TextUnformatted("Trace");
+    ImGui::PopFont();
     hint(tr(Str::AboutTagline));
+    ImGui::EndGroup();
     ImGui::Spacing();
 
 #ifdef NDEBUG

@@ -59,6 +59,10 @@ const FilterSet& filtersFor(NativeDialogs::Tag tag) {
         pattern = "png";
         name = Str::FilterPng;
         break;
+    case NativeDialogs::Tag::ExportJpeg:
+        pattern = "jpg;jpeg";
+        name = Str::FilterJpeg;
+        break;
     case NativeDialogs::Tag::ExportSvg:
         pattern = "svg";
         name = Str::FilterSvg;

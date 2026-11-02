@@ -21,7 +21,7 @@ public:
 
         if (doc.selection().active() && doc.selection().contains(px, py)) {
             // Lifting leaves the secondary color (or transparency) behind, like the eraser.
-            if (!doc.liftSelection(s.eraseToTransparent ? Rgba8{} : s.secondary))
+            if (!doc.liftSelection(clearsToTransparency(s, doc) ? Rgba8{} : s.secondary))
                 return;
             mode_ = Mode::Move;
             grab_ = {px, py};

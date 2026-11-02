@@ -5,13 +5,13 @@
 #include <filesystem>
 #include <string>
 
+#include "app/flow_workspace.hpp"
 #include "app/fonts.hpp"
 #include "app/languages.hpp"
 #include "app/mode.hpp"
 #include "app/native_dialogs.hpp"
 #include "app/paint_workspace.hpp"
 #include "app/pixel_workspace.hpp"
-#include "app/placeholder_workspace.hpp"
 #include "app/settings.hpp"
 #include "app/settings_window.hpp"
 #include "app/theme.hpp"
@@ -68,6 +68,8 @@ private:
     // Opens a file in the workspace it belongs to, switching to it. Returns false when the active workspace
     // should open it itself.
     bool routeOpen(const std::filesystem::path& path);
+    // Dropped files; true when `event` was a drop event.
+    bool handleDrop(const SDL_Event& event);
 
     // Quitting walks the workspaces that have unsaved changes one by one (the active one first), switches to
     // each and lets its own "Save changes?" prompt settle it. Cancelling any prompt abandons the exit.
@@ -95,11 +97,14 @@ private:
 
     WorkspaceContext workspaceContext_;
     PaintWorkspace paint_;
-    PlaceholderWorkspace flow_;
+    FlowWorkspace flow_;
     PixelWorkspace pixel_;
     std::array<Workspace*, kModeCount> workspaces_; // indexed by Mode
     Mode activeMode_ = Mode::Paint;
 
+    int dropIndex_ = 0;            // files of the current drop already put on the canvas
+    bool dropOpened_ = false;      // the current drop already opened a document
+    bool dropNoticeShown_ = false; // the current drop already showed a refusal
     bool exitPending_ = false;  // walking the workspaces with unsaved changes
     bool exitApproved_ = false; // every prompt is settled: leave
     int exitStep_ = 0;          // how many workspaces of the walk have been visited

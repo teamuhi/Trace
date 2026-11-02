@@ -61,12 +61,26 @@ public:
     // the default layout must be built over it. Asked while the dockspace is shown; a workspace answers true
     // at most once. Needed when a mode that used to show a placeholder gets real windows.
     virtual bool layoutStale(ImGuiID dockId) { (void)dockId; return false; }
+    // View > Reset Layout (and the button in Settings): shows every panel again, including those closed with their
+    // X, and has the default layout built the next time this dockspace is shown (the same path as a first start).
+    void resetLayout() {
+        showAllWindows();
+        layoutResetPending_ = true;
+    }
+    // Asked by the App while the dockspace is shown: true once per resetLayout().
+    bool takeLayoutReset() noexcept {
+        const bool pending = layoutResetPending_;
+        layoutResetPending_ = false;
+        return pending;
+    }
     // The workspace's windows. Called once per frame, inside the dockspace, while the workspace is active.
     virtual void drawWindows() = 0;
     // Modals and floating dialogs, drawn after the windows and the Settings window.
     virtual void drawDialogs() {}
 
     // --- menus ---------------------------------------------------------------------------------------
+    // Items of the File menu right after New (Flowchart: New from Template).
+    virtual void drawFileMenuExtras() {}
     // Menus between Edit and View (Paint: Image).
     virtual void drawModeMenus() {}
     // Items at the end of the Edit menu, each group starting with its own separator.
@@ -87,6 +101,9 @@ public:
     virtual bool busy() const = 0;
     // A pointer gesture is in progress: file and history shortcuts wait until it ends.
     virtual bool gestureActive() const { return false; }
+    // Brings what is pending in the workspace into its document (text still being typed, say), so a command that
+    // reads or replaces the document sees it. Called before a file command, a mode switch and exit.
+    virtual void commitPending() {}
     // False while the user is in the middle of something that would break if the workspace were hidden.
     virtual bool canLeave() const { return !gestureActive() && !busy(); }
 
@@ -98,6 +115,25 @@ public:
     // Export is separate from Save: a project is never silently flattened. Paint has nothing to export.
     virtual bool canExport() const { return false; }
     virtual void requestExport() {}
+
+    // --- dropped pictures ----------------------------------------------------------------------------
+    // A picture file dragged in from outside the program, to be put on the canvas as a movable object (never replacing
+    // the document). `screen` is the drop point in ImGui screen coordinates; `index` counts the files of one drop so
+    // they can be offset. Only called when nothing is busy and no gesture runs. Reports its own errors.
+    virtual void dropImage(const std::filesystem::path& path, ImVec2 screen, int index) {
+        (void)path;
+        (void)screen;
+        (void)index;
+    }
+
+    // --- off-screen rendering ------------------------------------------------------------------------
+    // Called by the App every frame right after the main ImGui draw data was rendered, before the frame is
+    // presented. A workspace that recorded drawing for an image during this frame (the Flowchart PNG export)
+    // renders it here; the renderer's target, scale and color must be left as found.
+    virtual void afterRender(SDL_Renderer* renderer) { (void)renderer; }
+    // The workspace has such work queued (or is playing an animation): the App renders a frame for it even though
+    // nothing else asked for one.
+    virtual bool wantsFrame() const { return false; }
 
     // --- edit verbs ----------------------------------------------------------------------------------
     virtual void undo() {}
@@ -125,7 +161,13 @@ public:
     virtual void actualSize() {}
 
 protected:
+    // Sets every panel's visibility back to its default (and flags settings it changed as dirty).
+    virtual void showAllWindows() {}
+
     WorkspaceContext& ctx_;
+
+private:
+    bool layoutResetPending_ = false;
 };
 
 } // namespace trace

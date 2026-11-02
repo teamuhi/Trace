@@ -20,6 +20,10 @@ public:
     const IRect& rect() const noexcept { return rect_; }
     bool contains(int x, int y) const noexcept { return x >= rect_.x0 && x < rect_.x1 && y >= rect_.y0 && y < rect_.y1; }
 
+    // The image grew by `dx` columns on the left and `dy` rows on top: moves a plain selection with the content.
+    // Not for a floating selection (callers wait for it to be flattened).
+    void shiftBy(int dx, int dy) noexcept;
+
     // Forgets the selection. A floating selection stays where it is in the image.
     void clear() noexcept;
 

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <span>
 #include <string>
 
 #include "core/cel_grid.hpp"
@@ -13,6 +14,9 @@
 #include "core/transform.hpp"
 
 namespace trace {
+
+// Which cels Document::replaceColor looks at: the active cel, the active layer in every frame, or everything.
+enum class ReplaceScope { Cel, Layer, All };
 
 // The picture being edited, its undo history and the region the renderer still has to upload.
 //
@@ -145,6 +149,14 @@ public:
     // the old name; names are cut to kMaxLayerNameBytes. Nothing when nothing changes.
     OpResult setLayerProps(int layer, const LayerInfo& props);
 
+    // Puts a picture sequence (an animated GIF) on a new layer above the active one, which becomes active: picture i
+    // goes into frame activeFrame + i with its top-left corner at (x, y); what falls outside the canvas is cut off.
+    // Frames the document lacks are appended (blank, with durationsMs[i] clamped to the allowed range, or the
+    // default when missing); existing frames keep their durations. One undo step. Nothing for no pictures; NoMemory
+    // when the layer, the frames or the pixels would exceed the limits.
+    OpResult importFrames(std::span<const Image> pictures, std::span<const int> durationsMs, int x, int y,
+                          std::string layerName = {});
+
     enum class FrameFill { Empty, Duplicate };
     // New frame after the active one, which becomes active; it takes the active frame's duration.
     OpResult addFrame(FrameFill fill = FrameFill::Empty);
@@ -175,6 +187,28 @@ public:
     // Changes the canvas size; the old image sits at `anchor` and new area is filled with `fill`.
     TransformResult resizeCanvas(int width, int height, Anchor anchor, Rgba8 fill);
     TransformResult cropToSelection();
+
+    // Turns every pixel that equals `from` in all four channels into `to` (exact match, no tolerance). Cel:
+    // the active cel; Layer: the active layer in every frame; All: every layer and frame. Locked layers are
+    // skipped. Nothing when from == to, when no unlocked cel in scope has a match, or when the document is
+    // empty. One undo step that touches only the changed cels (they get fresh ids, like any structure step);
+    // the active layer and frame stay where they are. Commits pending edits and flattens a floating selection
+    // first, like the other whole-document operations.
+    OpResult replaceColor(Rgba8 from, Rgba8 to, ReplaceScope scope);
+
+    // --- endless whiteboard ---------------------------------------------------------------------------
+    // An endless document is an ordinary one whose canvas grows on demand (growCanvas) instead of being fixed:
+    // transparent pixels show the board's paper, erasing leaves transparency and the layout's origin tracks where
+    // the pixel (0, 0) sits in the world. Not part of history; reset, load and loadStore clear it.
+    bool endless() const noexcept { return endless_; }
+    void setEndless(bool endless) noexcept { endless_ = endless; }
+    int originX() const noexcept { return store_.layout.originX; }
+    int originY() const noexcept { return store_.layout.originY; }
+    // Adds transparent area on each side (all >= 0, at least one > 0). One undo step that restores the size, the
+    // origin and the guides. Pixels, a plain selection and the guides keep their world position. Nothing when no
+    // side grows or while the selection floats (the caller flattens it first); NoMemory when the result would
+    // exceed the side limit or the pixel budget, or memory runs out.
+    OpResult growCanvas(int left, int top, int right, int bottom);
 
     Guides& guides() noexcept { return guides_; }
     const Guides& guides() const noexcept { return guides_; }
@@ -220,6 +254,7 @@ private:
     History history_;
     std::uint64_t generation_ = 0;
     std::uint64_t revision_ = 0;
+    bool endless_ = false;
     CelId nextCelId_ = 1;
     std::uint32_t nextLayerId_ = 1;
 };

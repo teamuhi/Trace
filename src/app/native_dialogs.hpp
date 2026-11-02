@@ -26,6 +26,7 @@ public:
         ExportSvg,
         ExportGif,
         ExportSheet, // a sprite sheet (PNG)
+        ExportJpeg,  // a whiteboard picture as JPEG
         PaletteLoad,
         PaletteSave,
     };

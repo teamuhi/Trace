@@ -4,6 +4,7 @@
 
 #include <string>
 
+#include "app/svg_icons.hpp"
 #include "core/keymap.hpp"
 #include "tools/tool.hpp"
 
@@ -39,6 +40,10 @@ std::string displayChord(const Chord& chord);
 // A menu entry whose shortcut text comes from the keymap, so it follows any rebinding. Returns what
 // ImGui::MenuItem returns.
 bool actionMenuItem(const Keymap& keymap, const char* label, Action action, bool* selected = nullptr,
+                    bool enabled = true);
+
+// The same with an icon in the menu's icon column (see iconMenuItem).
+bool actionMenuItem(const Keymap& keymap, Icon icon, const char* label, Action action, bool* selected = nullptr,
                     bool enabled = true);
 
 // The settings window sets this while it waits for a new chord so no shortcut fires meanwhile.

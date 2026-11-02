@@ -1,9 +1,17 @@
 #pragma once
 
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <functional>
 #include <optional>
 #include <utility>
+#include <vector>
 
 #include "app/texture_mirror.hpp"
+#include "core/animation.hpp"
+#include "core/color.hpp"
+#include "core/geometry.hpp"
 #include "core/guides.hpp"
 #include "core/pattern.hpp"
 #include "core/view_transform.hpp"
@@ -16,6 +24,7 @@ namespace trace {
 
 class Document;
 class Toolbox;
+struct ToolSettings;
 
 // Draws a Document inside the current ImGui window, handles zoom and pan, and turns mouse gestures into
 // tool presses, drags and releases. Keeps a TextureMirror of the document image current by uploading only the
@@ -28,10 +37,17 @@ public:
     CanvasView(const CanvasView&) = delete;
     CanvasView& operator=(const CanvasView&) = delete;
 
-    void init(SDL_Renderer* renderer) noexcept { mirror_.init(renderer); }
+    void init(SDL_Renderer* renderer) noexcept {
+        mirror_.init(renderer);
+        for (OnionGhost& ghost : ghosts_)
+            ghost.mirror.init(renderer);
+    }
 
     // Must run before the renderer is destroyed. Safe to call repeatedly.
-    void release() noexcept { mirror_.release(); }
+    void release() noexcept {
+        mirror_.release();
+        releaseOnion();
+    }
 
     // Fills the current window's content region with the canvas.
     void draw(Document& doc, Toolbox& tools);
@@ -49,6 +65,24 @@ public:
 
     // The image pixel under the top-left corner of the viewport (may be negative or past the image).
     Vec2f visibleImageOrigin() const noexcept { return view_.toImage(Vec2f{0.0f, 0.0f}); }
+
+    // The image rectangle in view (rounded outwards), and the image point under a screen position (nullopt when it
+    // is outside the canvas viewport). Both use the view as of the last draw().
+    IRect visibleImageRect() const noexcept;
+    std::optional<Vec2f> screenToImage(float x, float y) const noexcept;
+
+    // Endless whiteboard: no backdrop, checkerboard or border; transparent pixels show `paper`; the view is never
+    // refit on its own, follows the board when it grows to the left or top (so the drawing keeps its place on screen)
+    // and the rulers count from the board origin. Fit then frames what is drawn.
+    void setBoard(bool endless, Rgba8 paper) noexcept {
+        board_ = endless;
+        paper_ = paper;
+        if (!endless)
+            boardTracked_ = false;
+    }
+    // A hook run on the press that starts a tool gesture, before the tool sees it, with the image point pressed. The
+    // whiteboard grows here; the view is realigned afterwards so the press lands on the pixel under the pointer.
+    void setBeforePress(std::function<void(Document&, Vec2f)> hook) { beforePress_ = std::move(hook); }
 
     bool pixelGridEnabled() const noexcept { return showPixelGrid_; }
     void setPixelGridEnabled(bool enabled) noexcept { showPixelGrid_ = enabled; }
@@ -73,9 +107,61 @@ public:
     void setGuidesVisible(bool visible) noexcept { showGuides_ = visible; }
     void setSnapToGuides(bool enabled) noexcept { snapToGuides_ = enabled; }
     bool draggingGuide() const noexcept { return guideDrag_.active; }
+    // Pixel art only: an item of the symmetry list (see ToolSettings::symmetry) is being dragged.
+    bool draggingSymmetryAxis() const noexcept { return symDrag_.active; }
+
+    // Pixel art extras drawn around and behind the image. The tile preview shows the picture 3 x 3 with the
+    // neighbours dimmed; onion skin ghosts the neighbouring frames behind the active one. Both only change what is
+    // drawn, never the document.
+    void setTilePreview(bool on) noexcept { tilePreview_ = on; }
+    bool tilePreview() const noexcept { return tilePreview_; }
+    void setOnionSkin(bool on) noexcept { onionSkin_ = on; }
+    bool onionSkin() const noexcept { return onionSkin_; }
+    // How far the tile preview's neighbouring copies fade toward the `tileDim` color, 0..100 percent.
+    void setTileDimPercent(int percent) noexcept { tileDimPercent_ = std::clamp(percent, 0, 100); }
+    // How many frames before and after the active one are ghosted, how visible the nearest ghost is (percent; farther
+    // ones fade), and whether the first and last frames count as neighbours of each other.
+    void setOnionOptions(int before, int after, int opacityPercent, bool loop) noexcept {
+        onion_ = OnionOptions{std::clamp(before, 0, kMaxOnionGhostsPerSide), std::clamp(after, 0, kMaxOnionGhostsPerSide),
+                              std::clamp(opacityPercent, 1, 100), loop};
+    }
 
 private:
+    static constexpr int kMaxOnionGhostsPerSide = 4;
+
+    struct OnionOptions {
+        int before = 1;
+        int after = 1;
+        int opacityPercent = 40;
+        bool loop = false;
+        bool operator==(const OnionOptions&) const = default;
+    };
+    // One ghost frame: its picture on the GPU (made when first needed) and which frame it shows.
+    struct OnionGhost {
+        TextureMirror mirror;
+        OnionFrame frame;
+    };
+    // What the ghosts were last built from; they are rebuilt only when it differs.
+    struct OnionKey {
+        const Document* doc = nullptr;
+        std::uint64_t revision = 0;
+        int activeFrame = -1;
+        int frameCount = 0;
+        OnionOptions options;
+        bool operator==(const OnionKey&) const = default;
+    };
+
+    void releaseOnion() noexcept;
+    // Brings the ghosts up to date with the document (never while a gesture is drawing: they cannot change then).
+    void updateOnion(const Document& doc, bool gestureActive);
+    void drawOnion(ImDrawList* dl, const ImVec2& p0, const ImVec2& p1, const ImVec2& imgMin, int imgW, int imgH);
+    void drawTilePreview(ImDrawList* dl, const ImVec2& p0, const ImVec2& p1, const ImVec2& imgMin, int imgW, int imgH,
+                         float patternTile);
+
     void syncTexture(Document& doc);
+    // Keeps the drawing still on screen when the board origin moved (it grew, or an undo or redo changed it).
+    void followBoardOrigin(const Document& doc) noexcept;
+    void fitBoard(Document& doc);
     void handleViewInput(float originX, float originY, bool hovered, bool active);
     void routeGesture(Document& doc, Toolbox& tools, Vec2f mouse, bool hovered, float snapRadius);
     void zoomBy(float factor) noexcept;
@@ -86,6 +172,14 @@ private:
     void drawRulers(ImDrawList* dl, const ImVec2& origin, const ImVec2& p0, const ImVec2& p1, const ImVec2& imgMin,
                     float thickness, Vec2f mouse, bool showMarker) const;
     void drawGuides(ImDrawList* dl, const Document& doc, const ImVec2& p0, const ImVec2& p1, const ImVec2& imgMin) const;
+    // The Text tool's open box: applies or drops it when it can no longer stay open (another tool, a replaced
+    // document or layer), draws its preview, and shows the floating text field that takes the typing.
+    void keepTextSession(Document& doc, Toolbox& tools);
+    void drawTextPreview(ImDrawList* dl, Toolbox& tools, const ImVec2& p0, const ImVec2& p1, const ImVec2& imgMin) const;
+    void drawTextEntry(Document& doc, Toolbox& tools, const ImVec2& p0, const ImVec2& p1, const ImVec2& imgMin);
+    void updateSymmetryAxes(const Document& doc, Toolbox& tools, Vec2f mouse, bool hovered);
+    void drawSymmetryAxes(ImDrawList* dl, const Document& doc, const ToolSettings& settings, const ImVec2& p0,
+                          const ImVec2& p1, const ImVec2& imgMin) const;
 
     TextureMirror mirror_;
 
@@ -102,6 +196,13 @@ private:
     bool showPixelGrid_ = true;
     float gridMinZoom_ = 8.0f;
     bool pixelArt_ = false;
+    bool tilePreview_ = false;
+    bool onionSkin_ = false;
+    int tileDimPercent_ = 50;
+    OnionOptions onion_;
+    OnionKey onionKey_;
+    std::array<OnionGhost, 2 * kMaxOnionGhostsPerSide> ghosts_; // the first onionShown_ entries are drawn
+    int onionShown_ = 0;
     PatternStyle backdropPattern_ = PatternStyle::Solid;
     PatternStyle transparencyPattern_ = PatternStyle::Checker;
     int patternSpacing_ = kDefaultPatternSpacing;
@@ -119,6 +220,43 @@ private:
     };
     GuideDrag guideDrag_;
     std::optional<std::pair<GuideAxis, int>> hoverGuide_;
+
+    // Pixel art: the symmetry item under the pointer (-1 for none) and whether it is its mirror line rather than its
+    // grip or marker, and the item being dragged. A drag keeps the item's point where it was at the press (`startX`,
+    // `startY`, in half pixels) and the pointer's image position then, and moves the point by the pointer's
+    // movement: freely for a grip or marker, along the mirror's normal only (`perpendicular`) for the line. `originalX`
+    // and `originalY` are the stored values to put back on Escape.
+    struct SymmetryDrag {
+        bool active = false;
+        int index = -1;
+        bool perpendicular = false;
+        Vec2f start;
+        int startX = 0;
+        int startY = 0;
+        int originalX = 0;
+        int originalY = 0;
+    };
+    SymmetryDrag symDrag_;
+    int hoverSymItem_ = -1;
+    bool hoverSymLine_ = false;
+    bool symmetryHandleHot() const noexcept { return hoverSymItem_ >= 0 || symDrag_.active; }
+    // Text tool: the text field's contents (a copy of the tool's text, edited in place by ImGui), the box it was
+    // filled for, whether it still has to take the keyboard focus, and its size last frame (to place it).
+    std::vector<char> textBuffer_;
+    std::uint64_t textSerial_ = 0;
+    bool textFocusPending_ = false;
+    Vec2f textEntrySize_;
+    static constexpr float kBoardMinZoom = 0.02f;
+    bool board_ = false;
+    Rgba8 paper_{255, 255, 255, 255};
+    bool boardTracked_ = false;
+    int trackedOriginX_ = 0;
+    int trackedOriginY_ = 0;
+    bool pendingFitBoard_ = false;
+    std::function<void(Document&, Vec2f)> beforePress_;
+    Vec2f viewOrigin_;     // screen position of the viewport top-left corner, as of the last draw()
+    int rulerOriginX_ = 0; // world position of image pixel (0, 0), for the rulers
+    int rulerOriginY_ = 0;
     bool hoverValid_ = false;
     int hoverX_ = 0;
     int hoverY_ = 0;

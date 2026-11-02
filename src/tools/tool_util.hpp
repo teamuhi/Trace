@@ -2,10 +2,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdlib>
 
 #include "core/color.hpp"
 #include "core/geometry.hpp"
+#include "core/raster.hpp"
+#include "core/symmetry.hpp"
 #include "tools/tool.hpp"
 
 namespace trace::tools {
@@ -54,6 +57,46 @@ inline Rgba8 activeColor(const ToolSettings& s, const PointerEvent& ev) noexcept
 
 inline Rgba8 otherColor(const ToolSettings& s, const PointerEvent& ev) noexcept {
     return ev.secondary ? s.primary : s.secondary;
+}
+
+// The square a `size` square brush covers when stamped on pixel (x, y): anchored size / 2 to the left of and
+// above the pixel, like stampSquareLine, so an odd size is centered on it.
+inline IRect squareStampRect(int x, int y, int size) noexcept {
+    const int left = x - size / 2;
+    const int top = y - size / 2;
+    return IRect{left, top, left + size, top + size};
+}
+
+// Calls visit(x, y) for the pixels of symmetry copy `k` of the pixel line (ax, ay) - (bx, by), start first. An
+// exact copy (mirrors at multiples of 45 degrees and 90 degree turns) maps the original's Bresenham pixels one
+// by one, so it is exactly the original's picture moved. Any other angle cannot: rounding each mapped pixel
+// leaves gaps and double hits, so it draws a Bresenham line between the two ends mapped by the copy's base step
+// instead (connected, one pixel thick), then moves that line by the copy's exact part, so copies a quarter turn
+// apart are exact images of each other. Consecutive segments of a stroke share their end pixel, which maps to
+// the same pixel both times.
+template <class Visit>
+void forEachCopyLinePixel(const SymmetryPlan& plan, std::size_t k, int ax, int ay, int bx, int by, Visit&& visit) {
+    const auto emit = [&](int x, int y) {
+        const PixelPos p = plan.extraPixel(k, PixelPos{x, y});
+        visit(p.x, p.y);
+    };
+    if (plan.exact(k)) {
+        forEachLinePixel(ax, ay, bx, by, emit);
+        return;
+    }
+    const PixelPos a = plan.basePixel(k, ax, ay);
+    const PixelPos b = plan.basePixel(k, bx, by);
+    forEachLinePixel(a.x, a.y, b.x, b.y, emit);
+}
+
+// An end of copy `k` of a capsule whose end is `v`: the continuous point when antialiased, else the center of
+// the copy's pixel (what a hard-edged capsule snaps to anyway, done here through plan.pixel so the snapping
+// happens before the quarter turns and the copies stay exact images of each other).
+inline Vec2f copyCapsuleEnd(const SymmetryPlan& plan, std::size_t k, Vec2f v, bool antialias) noexcept {
+    if (antialias)
+        return plan.point(k, v);
+    const PixelPos p = plan.pixel(k, toPixel(v.x), toPixel(v.y));
+    return Vec2f{static_cast<float>(p.x) + 0.5f, static_cast<float>(p.y) + 0.5f};
 }
 
 // Pixel box spanned by two corners (both inclusive); a square when `square` is set.

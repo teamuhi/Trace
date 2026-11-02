@@ -94,20 +94,16 @@ std::string IniFile::serialize() const {
 }
 
 IniFile::Section& IniFile::sectionRef(std::string_view name) {
-    for (Section& section : sections_) {
-        if (section.name == name)
-            return section;
-    }
+    if (const auto found = index_.find(name); found != index_.end())
+        return sections_[found->second];
+    index_.emplace(std::string(name), sections_.size());
     sections_.push_back(Section{std::string(name), {}});
     return sections_.back();
 }
 
 const IniFile::Section* IniFile::section(std::string_view name) const {
-    for (const Section& section : sections_) {
-        if (section.name == name)
-            return &section;
-    }
-    return nullptr;
+    const auto found = index_.find(name);
+    return found == index_.end() ? nullptr : &sections_[found->second];
 }
 
 const std::string* IniFile::get(std::string_view sectionName, std::string_view key) const {

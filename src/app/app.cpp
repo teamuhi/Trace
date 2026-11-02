@@ -13,6 +13,8 @@
 #include <optional>
 #include <string>
 
+#include "app/app_icon.hpp"
+#include "app/icon_widgets.hpp"
 #include "app/keybinds.hpp"
 #include "app/theme.hpp"
 #include "app/theme_io.hpp"
@@ -31,13 +33,31 @@ constexpr int kFramesPerEvent = 3;   // ImGui needs a few frames to settle after
 constexpr auto kStatsInterval = std::chrono::seconds(1);
 constexpr float kBaseFontSize = 14.0f;
 
+Icon modeIcon(Mode mode) noexcept {
+    switch (mode) {
+    case Mode::Paint: return Icon::PaintRoller;
+    case Mode::Flowchart: return Icon::FlowchartIcon;
+    case Mode::PixelArt: return Icon::PixelartIcon;
+    }
+    return Icon::None;
+}
+
+Icon themeIcon(ThemeMode mode) noexcept {
+    switch (mode) {
+    case ThemeMode::System: return Icon::System;
+    case ThemeMode::Light: return Icon::LightTheme;
+    case ThemeMode::Dark: return Icon::DarkTheme;
+    }
+    return Icon::None;
+}
+
 } // namespace
 
 App::App()
     : workspaceContext_{settings_, settingsDirty_, toasts_, dialogs_,
                         [this](const std::filesystem::path& path) { return routeOpen(path); }},
       paint_(workspaceContext_),
-      flow_(workspaceContext_, Mode::Flowchart),
+      flow_(workspaceContext_),
       pixel_(workspaceContext_),
       workspaces_{&paint_, &flow_, &pixel_} {}
 
@@ -62,6 +82,7 @@ bool App::init() {
         return false;
     }
     SDL_SetWindowMinimumSize(window_, 640, 400);
+    setWindowIcon(window_); // a missing icon only leaves the default one
 
     renderer_ = SDL_CreateRenderer(window_, nullptr);
     if (!renderer_) {
@@ -110,6 +131,8 @@ bool App::init() {
         return false;
     }
     rendererBackend_ = true;
+    initSvgIcons(renderer_);
+    initAppIcon(renderer_);
 
     dialogs_.init(window_);
     {
@@ -147,6 +170,11 @@ void App::run() {
 
         updateStats();
 
+        // Queued off-screen work needs a rendered frame; a minimized window renders nothing, so it waits for the
+        // restore event instead of spinning.
+        if (framesToRender_ < 1 && workspace().wantsFrame() && !(SDL_GetWindowFlags(window_) & SDL_WINDOW_MINIMIZED))
+            framesToRender_ = 1;
+
         if (framesToRender_ > 0) {
             renderFrame();
             --framesToRender_;
@@ -177,6 +205,8 @@ void App::shutdown() {
     }
     for (Workspace* ws : workspaces_)
         ws->release();
+    releaseSvgIcons();
+    releaseAppIcon();
     if (renderer_) {
         SDL_DestroyRenderer(renderer_);
         renderer_ = nullptr;
@@ -202,7 +232,9 @@ void App::handleEvent(const SDL_Event& event) {
         return;
     }
     if (workspace().fileSession().handleEvent(event))
-        return; // a file dialog result or a dropped file
+        return; // a file dialog result
+    if (handleDrop(event))
+        return;
 
     switch (event.type) {
     case SDL_EVENT_QUIT:
@@ -215,6 +247,63 @@ void App::handleEvent(const SDL_Event& event) {
     default:
         break;
     }
+}
+
+// Files dragged in from outside. A project file (.tflow, .tpix, .tboard) or any file dropped with Shift held opens as
+// a document, as File > Open would (only the first of a drop: the rest would replace it). Pictures go onto the canvas
+// of the active mode as movable objects, each further file of a drop offset a little from the last.
+bool App::handleDrop(const SDL_Event& event) {
+    switch (event.type) {
+    case SDL_EVENT_DROP_BEGIN:
+    case SDL_EVENT_DROP_COMPLETE:
+        dropIndex_ = 0;
+        dropOpened_ = false;
+        dropNoticeShown_ = false;
+        return true;
+    case SDL_EVENT_DROP_POSITION:
+        return true;
+    case SDL_EVENT_DROP_FILE:
+        break;
+    default:
+        return false;
+    }
+    if (!event.drop.data)
+        return true;
+
+    const std::filesystem::path path = pathFromUtf8(event.drop.data);
+    Workspace& ws = workspace();
+    const auto notice = [&](Str text, Toasts::Kind kind) {
+        if (!dropNoticeShown_) {
+            dropNoticeShown_ = true; // once per drop, however many files came with it
+            toasts_.push(tr(text), kind);
+        }
+    };
+
+    const bool asDocument = (SDL_GetModState() & SDL_KMOD_SHIFT) != 0 || sniffProjectKind(path).has_value();
+    if (asDocument) {
+        if (dropOpened_) {
+            notice(Str::ToastDropSkipped, Toasts::Kind::Info);
+        } else if (exitPending_ || ws.busy()) {
+            notice(Str::ToastDropBusy, Toasts::Kind::Error);
+        } else {
+            dropOpened_ = true;
+            ws.fileSession().requestOpenPath(path);
+        }
+        return true;
+    }
+
+    if (exitPending_ || ws.busy()) {
+        notice(Str::ToastDropBusy, Toasts::Kind::Error);
+        return true;
+    }
+    ws.commitPending(); // text still being typed goes into the picture first
+    if (ws.gestureActive()) {
+        notice(Str::ToastDropBusy, Toasts::Kind::Error);
+        return true;
+    }
+    const ImVec2 base = ImGui::GetMainViewport()->Pos;
+    ws.dropImage(path, ImVec2(base.x + event.drop.x, base.y + event.drop.y), dropIndex_++);
+    return true;
 }
 
 void App::updateStats() {
@@ -267,6 +356,9 @@ void App::renderFrame() {
         SDL_Log("SDL_RenderClear failed: %s", SDL_GetError());
 
     ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), renderer_);
+    // Off-screen work the workspace recorded during this frame (it needed the font atlas this frame's draw data
+    // just brought up to date), e.g. a Flowchart PNG export. Runs before the present; it restores the renderer.
+    workspace().afterRender(renderer_);
     if (!SDL_RenderPresent(renderer_))
         SDL_Log("SDL_RenderPresent failed: %s", SDL_GetError());
 }
@@ -281,7 +373,9 @@ void App::drawUi() {
     Workspace& ws = workspace();
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     const ImGuiID dockId = ws.dockSpaceId();
-    const bool buildLayout = ImGui::DockBuilderGetNode(dockId) == nullptr || ws.layoutStale(dockId); // no usable saved layout
+    const bool resetRequested = ws.takeLayoutReset(); // View > Reset Layout, or the Settings button
+    const bool buildLayout = resetRequested || ImGui::DockBuilderGetNode(dockId) == nullptr ||
+                             ws.layoutStale(dockId); // asked to start over, or no usable saved layout
     ImGui::DockSpaceOverViewport(dockId, viewport);
     if (buildLayout)
         ws.buildDefaultLayout(dockId, viewport->WorkSize);
@@ -289,6 +383,11 @@ void App::drawUi() {
     ws.drawWindows();
 
     settingsDirty_ |= settingsWindow_.draw(settings_, paint_.toolbox(), settingsPath_, dialogs_, languages_);
+    if (settingsWindow_.takeResetLayoutRequest()) {
+        for (Workspace* each : workspaces_)
+            each->resetLayout(); // every mode starts over; each rebuilds when it is next shown
+        framesToRender_ = std::max(framesToRender_, kFramesPerEvent);
+    }
     ws.drawDialogs();
     toasts_.draw();
 
@@ -320,6 +419,12 @@ void App::handleShortcuts() {
             return; // this frame keys were meant for the old mode
         }
     }
+
+    // Text still being typed is not in the picture yet: a file command must see it (and it is what lets the file
+    // shortcuts below run at all, since an open text box counts as a gesture).
+    if (fire(Action::NewCanvas) || fire(Action::OpenFile) || fire(Action::SaveFile) || fire(Action::SaveFileAs) ||
+        (fire(Action::Export) && ws.canExport()))
+        ws.commitPending();
 
     // File and history shortcuts wait until the current gesture is finished.
     if (!ws.gestureActive()) {
@@ -375,6 +480,7 @@ bool App::canSwitchMode() noexcept {
 bool App::switchMode(Mode target, bool force) {
     if (target == activeMode_)
         return true;
+    workspace().commitPending(); // what is being typed goes into the picture before the mode is left
     if (!force && !canSwitchMode())
         return false;
     activeMode_ = target;
@@ -392,6 +498,8 @@ bool App::routeOpen(const std::filesystem::path& path) {
             target = Mode::Flowchart;
         } else if (*kind == kProjectPixel) {
             target = Mode::PixelArt;
+        } else if (*kind == kProjectBoard) {
+            target = Mode::Paint;
         } else {
             session.report(trf(Str::ErrProjectUnknown, {utf8FromPath(path.filename())}), true);
             return true;
@@ -412,6 +520,7 @@ bool App::routeOpen(const std::filesystem::path& path) {
 void App::beginExit() {
     if (exitPending_ || workspace().busy())
         return;
+    workspace().commitPending(); // so the unsaved-changes check sees it
     exitPending_ = true;
     exitStep_ = 0;
     exitFirst_ = activeMode_;
@@ -579,42 +688,44 @@ void App::drawMenuBar() {
 
     if (ImGui::BeginMenu(tr(Str::MenuFile))) {
         const bool document = files.hasDocument();
-        if (actionMenuItem(keys, tr(Str::MenuNew), Action::NewCanvas, nullptr, document))
+        if (actionMenuItem(keys, Icon::File, tr(Str::MenuNew), Action::NewCanvas, nullptr, document))
             files.requestNew();
-        if (actionMenuItem(keys, tr(Str::MenuOpen), Action::OpenFile))
+        ws.drawFileMenuExtras();
+        if (actionMenuItem(keys, Icon::Folder, tr(Str::MenuOpen), Action::OpenFile))
             files.requestOpen();
         ImGui::Separator();
-        if (actionMenuItem(keys, tr(Str::MenuSave), Action::SaveFile, nullptr, document))
+        if (actionMenuItem(keys, Icon::Save, tr(Str::MenuSave), Action::SaveFile, nullptr, document))
             files.requestSave();
-        if (actionMenuItem(keys, tr(Str::MenuSaveAs), Action::SaveFileAs, nullptr, document))
+        if (actionMenuItem(keys, Icon::Save, tr(Str::MenuSaveAs), Action::SaveFileAs, nullptr, document))
             files.requestSaveAs();
-        if (actionMenuItem(keys, tr(Str::MenuExport), Action::Export, nullptr, ws.canExport()))
+        if (actionMenuItem(keys, Icon::Export, tr(Str::MenuExport), Action::Export, nullptr, ws.canExport()))
             ws.requestExport();
         ImGui::Separator();
-        if (actionMenuItem(keys, tr(Str::MenuSettings), Action::OpenSettings))
+        if (actionMenuItem(keys, Icon::Settings, tr(Str::MenuSettings), Action::OpenSettings))
             settingsWindow_.open();
         ImGui::Separator();
-        if (ImGui::MenuItem(tr(Str::MenuExit)))
+        if (iconMenuItem(Icon::Exit, tr(Str::MenuExit)))
             beginExit();
         ImGui::EndMenu();
     }
 
     if (ImGui::BeginMenu(tr(Str::MenuEdit))) {
-        if (actionMenuItem(keys, tr(Str::MenuUndo), Action::Undo, nullptr, ws.canUndo()))
+        if (actionMenuItem(keys, Icon::Undo, tr(Str::MenuUndo), Action::Undo, nullptr, ws.canUndo()))
             ws.undo();
-        if (actionMenuItem(keys, tr(Str::MenuRedo), Action::Redo, nullptr, ws.canRedo()))
+        if (actionMenuItem(keys, Icon::Redo, tr(Str::MenuRedo), Action::Redo, nullptr, ws.canRedo()))
             ws.redo();
         ImGui::Separator();
-        if (actionMenuItem(keys, tr(Str::MenuCut), Action::Cut, nullptr, ws.canCut()))
+        if (actionMenuItem(keys, Icon::Cut, tr(Str::MenuCut), Action::Cut, nullptr, ws.canCut()))
             ws.cut();
-        if (actionMenuItem(keys, tr(Str::MenuCopy), Action::Copy, nullptr, ws.canCopy()))
+        if (actionMenuItem(keys, Icon::Duplicate, tr(Str::MenuCopy), Action::Copy, nullptr, ws.canCopy()))
             ws.copy();
-        if (actionMenuItem(keys, tr(Str::MenuPaste), Action::Paste, nullptr, ws.canPaste()))
+        if (actionMenuItem(keys, Icon::Paste, tr(Str::MenuPaste), Action::Paste, nullptr, ws.canPaste()))
             ws.paste();
-        if (actionMenuItem(keys, tr(Str::MenuDelete), Action::DeleteSelection, nullptr, ws.canDeleteSelection()))
+        if (actionMenuItem(keys, Icon::Delete, tr(Str::MenuDelete), Action::DeleteSelection, nullptr,
+                           ws.canDeleteSelection()))
             ws.deleteSelection();
         ImGui::Separator();
-        if (actionMenuItem(keys, tr(Str::MenuSelectAll), Action::SelectAll, nullptr, ws.canSelectAll()))
+        if (actionMenuItem(keys, Icon::Marquee, tr(Str::MenuSelectAll), Action::SelectAll, nullptr, ws.canSelectAll()))
             ws.selectAll();
         if (actionMenuItem(keys, tr(Str::MenuDeselect), Action::Deselect, nullptr, ws.canDeselect()))
             ws.deselect();
@@ -626,22 +737,26 @@ void App::drawMenuBar() {
 
     if (ImGui::BeginMenu(tr(Str::MenuView))) {
         const bool zoom = ws.canZoom();
-        if (actionMenuItem(keys, tr(Str::MenuZoomIn), Action::ZoomIn, nullptr, zoom))
+        if (actionMenuItem(keys, Icon::MagnifyingGlassZoomIn, tr(Str::MenuZoomIn), Action::ZoomIn, nullptr, zoom))
             ws.zoomIn();
-        if (actionMenuItem(keys, tr(Str::MenuZoomOut), Action::ZoomOut, nullptr, zoom))
+        if (actionMenuItem(keys, Icon::MagnifyingGlassZoomOut, tr(Str::MenuZoomOut), Action::ZoomOut, nullptr, zoom))
             ws.zoomOut();
-        if (actionMenuItem(keys, tr(Str::MenuFitToWindow), Action::FitToWindow, nullptr, zoom))
+        if (actionMenuItem(keys, Icon::ArrowExpand, tr(Str::MenuFitToWindow), Action::FitToWindow, nullptr, zoom))
             ws.fit();
-        if (actionMenuItem(keys, tr(Str::MenuActualSize), Action::ActualSize, nullptr, zoom))
+        if (actionMenuItem(keys, Icon::ArrowCompress, tr(Str::MenuActualSize), Action::ActualSize, nullptr, zoom))
             ws.actualSize();
         ImGui::Separator();
 
         ws.drawViewMenuItems();
-        if (ImGui::MenuItem(tr(Str::MenuStatusBar), nullptr, &settings_.showStatusBar))
+        if (iconMenuItem(Icon::Info, tr(Str::MenuStatusBar), nullptr, &settings_.showStatusBar))
             settingsDirty_ = true;
+        if (iconMenuItem(Icon::Reset, tr(Str::MenuResetLayout))) {
+            ws.resetLayout();
+            framesToRender_ = std::max(framesToRender_, kFramesPerEvent);
+        }
         ImGui::Separator();
 
-        if (ImGui::BeginMenu(tr(Str::MenuTheme))) {
+        if (iconBeginMenu(Icon::Theme, tr(Str::MenuTheme))) {
             struct Item {
                 Str label;
                 ThemeMode mode;
@@ -652,7 +767,8 @@ void App::drawMenuBar() {
                 {Str::WordDark, ThemeMode::Dark},
             };
             for (const Item& item : items) {
-                if (ImGui::MenuItem(tr(item.label), nullptr, settings_.theme == item.mode)) {
+                bool current = settings_.theme == item.mode;
+                if (iconMenuItem(themeIcon(item.mode), tr(item.label), nullptr, &current)) {
                     settings_.theme = item.mode;
                     settingsDirty_ = true;
                 }
@@ -666,80 +782,117 @@ void App::drawMenuBar() {
     ImGui::EndMainMenuBar();
 }
 
-// Paint | Flowchart | Pixel Art, right-aligned in the menu bar. The shown mode is filled with the accent color
-// (and the text color that reads on it); the others use the button colors, so it follows the theme. While the
-// mode cannot change (a gesture, a dialog) it is drawn dimmed and ignores clicks.
+// Paint | Flowchart | Pixel Art as a pill-shaped segmented control, right-aligned in the menu bar: a rounded track
+// holds one rounded segment per mode, the shown mode filled with the accent color (and the text color that reads on
+// it), the others plain with a soft highlight on hover. When the window is too narrow for all labels, only the shown
+// mode keeps its label (every segment keeps its tooltip). While the mode cannot change (a gesture, a dialog) it is
+// drawn dimmed and ignores clicks.
 void App::drawModeSwitcher() {
     const ThemeTokens& t = tokens();
     const ImGuiStyle& style = ImGui::GetStyle();
+    const float em = ImGui::GetFontSize();
     const float height = ImGui::GetFrameHeight();
-    const float inset = std::round(style.FramePadding.y * 0.5f);
-    const float padX = std::round(ImGui::GetFontSize() * 0.9f);
-    const float rounding = std::round((height - 2.0f * inset) * 0.3f);
+    const float inset = std::max(1.0f, std::round(style.FramePadding.y * 0.35f));
+    const float trackH = height - 2.0f * inset;
+    const float margin = std::max(2.0f, std::round(trackH * 0.1f)); // track edge to segment
+    const float segH = trackH - 2.0f * margin;
+    const float padX = std::round(em * 0.85f);
     const bool enabled = canSwitchMode();
     const float alpha = enabled ? 1.0f : style.DisabledAlpha;
+    const bool dark = isDark();
 
-    float widths[kModeCount];
-    float total = 0.0f;
+    const float iconSize = std::min(std::round(em * 1.25f), std::max(8.0f, std::floor(segH - 2.0f)));
+    const float iconGap = std::round(em * 0.45f);
+
+    // Widths with every label, and without the labels of the modes that are not shown.
+    float full[kModeCount];
+    float compact[kModeCount];
+    float fullTotal = 0.0f;
+    float compactTotal = 0.0f;
     for (const Mode mode : kAllModes) {
-        const float w = std::round(ImGui::CalcTextSize(tr(modeString(mode))).x + 2.0f * padX);
-        widths[static_cast<int>(mode)] = w;
-        total += w;
+        const int i = static_cast<int>(mode);
+        full[i] = std::round(ImGui::CalcTextSize(tr(modeString(mode))).x + iconSize + iconGap + 2.0f * padX);
+        compact[i] = mode == activeMode_ ? full[i] : std::round(iconSize + 2.0f * padX * 0.8f);
+        fullTotal += full[i];
+        compactTotal += compact[i];
     }
 
     const ImVec2 menuEnd = ImGui::GetCursorScreenPos();
-    const float rightEdge = ImGui::GetWindowPos().x + ImGui::GetWindowWidth() - std::round(ImGui::GetFontSize() * 0.5f);
-    const float startX = std::max(rightEdge - total, menuEnd.x + style.ItemSpacing.x); // never over the menus
+    const float rightEdge = ImGui::GetWindowPos().x + ImGui::GetWindowWidth() - std::round(em * 0.5f);
+    const float leftLimit = menuEnd.x + style.ItemSpacing.x; // never over the menus
+    const bool showAll = rightEdge - (fullTotal + 2.0f * margin) >= leftLimit;
+    const float* widths = showAll ? full : compact;
+    const float total = showAll ? fullTotal : compactTotal;
+    const float trackW = total + 2.0f * margin;
+    const float startX = std::max(rightEdge - trackW, leftLimit);
     ImGui::SetCursorScreenPos(ImVec2(startX, menuEnd.y));
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    const auto withAlpha = [alpha](ImVec4 c) {
-        c.w *= alpha;
+    const auto mix = [](ImVec4 a, const ImVec4& b, float f) {
+        return ImVec4(a.x + (b.x - a.x) * f, a.y + (b.y - a.y) * f, a.z + (b.z - a.z) * f, 1.0f);
+    };
+    const auto withAlpha = [alpha](ImVec4 c, float extra = 1.0f) {
+        c.w *= alpha * extra;
         return ImGui::ColorConvertFloat4ToU32(c);
     };
     const ImVec4 onAccent = contrastText(t.accent);
+    const ImVec4 trackFill = dark ? mix(t.windowBg, ImVec4(0, 0, 0, 1), 0.35f) : mix(t.windowBg, t.text, 0.10f);
     const ImVec2 first = ImGui::GetCursorScreenPos();
-    float x = first.x;
+    const float top = first.y + inset;
 
+    // Track: a pill behind the segments, with a faint outline so it holds up on any window color.
+    dl->AddRectFilled(ImVec2(first.x, top), ImVec2(first.x + trackW, top + trackH), withAlpha(trackFill), trackH * 0.5f);
+    dl->AddRect(ImVec2(first.x, top), ImVec2(first.x + trackW, top + trackH), withAlpha(t.text, 0.16f), trackH * 0.5f);
+
+    float x = first.x + margin;
     for (const Mode mode : kAllModes) {
         const int index = static_cast<int>(mode);
+        const bool selected = mode == activeMode_;
+        const char* label = tr(modeString(mode));
+        const bool showLabel = showAll || selected;
+
         ImGui::PushID(index);
-        ImGui::SetCursorScreenPos(ImVec2(x, first.y));
-        ImGui::InvisibleButton("##mode", ImVec2(widths[index], height));
+        ImGui::SetCursorScreenPos(ImVec2(x, top));
+        ImGui::InvisibleButton("##mode", ImVec2(widths[index], trackH));
         x += widths[index];
         const bool clicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
-        const bool hovered = ImGui::IsItemHovered();
-        const bool held = ImGui::IsItemActive();
+        const bool hovered = enabled && ImGui::IsItemHovered();
+        const bool held = enabled && ImGui::IsItemActive();
+        const bool focused = enabled && ImGui::IsItemFocused();
         const ImVec2 p0 = ImGui::GetItemRectMin();
         const ImVec2 p1 = ImGui::GetItemRectMax();
+        const ImVec2 a(p0.x, p0.y + margin);
+        const ImVec2 b(p1.x, p1.y - margin);
+        const float segRound = segH * 0.5f;
 
-        const bool selected = mode == activeMode_;
-        ImVec4 fill = t.button;
         ImVec4 text = t.text;
+        float textAlpha = hovered ? 1.0f : 0.78f;
         if (selected) {
-            fill = t.accent;
+            ImVec4 fill = t.accent;
+            if (held)
+                fill = mix(fill, ImVec4(0, 0, 0, 1), 0.15f);
+            else if (hovered)
+                fill = mix(fill, ImVec4(1, 1, 1, 1), 0.10f);
+            dl->AddRectFilled(a, b, withAlpha(fill), segRound);
+            dl->AddRect(a, b, withAlpha(mix(fill, onAccent, 0.22f)), segRound); // a soft edge, so the fill is not harsh
             text = onAccent;
-        } else if (enabled && held) {
-            fill = ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive);
-        } else if (enabled && hovered) {
-            fill = ImGui::GetStyleColorVec4(ImGuiCol_ButtonHovered);
+            textAlpha = 1.0f;
+        } else if (hovered || held) {
+            dl->AddRectFilled(a, b, withAlpha(mix(trackFill, t.text, held ? 0.20f : 0.12f)), segRound);
         }
+        if (focused)
+            dl->AddRect(a, b, withAlpha(t.accent, 0.9f), segRound, 0, 2.0f);
 
-        const ImDrawFlags corners = index == 0                  ? ImDrawFlags_RoundCornersLeft
-                                    : index == kModeCount - 1 ? ImDrawFlags_RoundCornersRight
-                                                                : ImDrawFlags_RoundCornersNone;
-        const ImVec2 a(p0.x, p0.y + inset);
-        const ImVec2 b(p1.x, p1.y - inset);
-        dl->AddRectFilled(a, b, withAlpha(fill), rounding, corners);
-        if (index > 0)
-            dl->AddLine(ImVec2(a.x, a.y), ImVec2(a.x, b.y), withAlpha(ImGui::GetStyleColorVec4(ImGuiCol_Border)));
-
-        const char* label = tr(modeString(mode));
         const ImVec2 size = ImGui::CalcTextSize(label);
-        dl->AddText(ImVec2(std::round(p0.x + (widths[index] - size.x) * 0.5f), std::round(p0.y + (height - size.y) * 0.5f)),
-                    withAlpha(text), label);
+        const float contentWidth = iconSize + (showLabel ? iconGap + size.x : 0.0f);
+        const float contentX = std::round(p0.x + (widths[index] - contentWidth) * 0.5f);
+        drawIcon(dl, modeIcon(mode), ImVec2(contentX, std::round(p0.y + (trackH - iconSize) * 0.5f)), iconSize,
+                 withAlpha(text, textAlpha));
+        if (showLabel)
+            dl->AddText(ImVec2(contentX + iconSize + iconGap, std::round(p0.y + (trackH - size.y) * 0.5f)),
+                        withAlpha(text, textAlpha), label);
 
-        if (hovered) {
+        if (ImGui::IsItemHovered()) {
             const std::string shortcut = displayShortcut(settings_.keymap, modeAction(mode));
             const std::string name = label;
             ImGui::SetTooltip("%s", (shortcut.empty() ? trf(Str::ModeSwitchTip, {name})
@@ -750,8 +903,6 @@ void App::drawModeSwitcher() {
             switchMode(mode);
         ImGui::PopID();
     }
-    dl->AddRect(ImVec2(first.x, first.y + inset), ImVec2(first.x + total, first.y + height - inset),
-                withAlpha(ImGui::GetStyleColorVec4(ImGuiCol_Border)), rounding);
 }
 
 void App::drawStatusBar() {

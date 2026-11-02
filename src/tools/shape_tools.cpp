@@ -39,10 +39,12 @@ class ShapeTool final : public Tool {
 public:
     explicit ShapeTool(ToolId id) : id_(id) {}
 
-    void press(Document& doc, ToolSettings&, const PointerEvent& ev) override {
+    void press(Document& doc, ToolSettings& s, const PointerEvent& ev) override {
         if (doc.image().empty())
             return;
         active_ = true;
+        // Fixed for the whole gesture, so changing the list mid-drag cannot change a preview already drawn.
+        plan_ = resolveSymmetry(s.symmetry, doc.image().width(), doc.image().height());
         start_ = snapStartPoint(doc, sanitize(ev.pos), ev.snapRadius);
     }
 
@@ -108,53 +110,76 @@ private:
         doc.markDirty(unionOf(previous, lastDirty_));
     }
 
+    // Draws the shape and, with symmetry on, its copies. Copies are independent drawings over the same
+    // snapshot: where two copies overlap (a shape crossing the axis or the center) a translucent color blends
+    // once per copy, while an opaque one is exact. In Both mode every copy's interior goes down before any
+    // outline, so an outline is never hidden by another copy's fill. Rectangles and ellipses stay axis-aligned
+    // pixel boxes: a quarter turn swaps width and height exactly, any other angle keeps the size and only moves
+    // the box's center around the rotation center (a rotated rectangle is not a pixel box); a reflection across
+    // a diagonal swaps them too. Lines are true lines, so every angle maps them.
     IRect render(Image& img, const ToolSettings& s, const PointerEvent& ev, Vec2f end) const {
         const int width = std::clamp(s.strokeWidth, ToolSettings::kMinSize, ToolSettings::kMaxSize);
         const Paint stroke{activeColor(s, ev)};
         const Paint other{otherColor(s, ev)};
+        const std::size_t copies = plan_.count();
+        IRect touched;
 
         if (id_ == ToolId::Line) {
             const Vec2f a = pixelCenter(start_);
             Vec2f b = pixelCenter(end);
             if (ev.shift)
                 b = constrainAngle(a, b);
-            if (width == 1 && !s.antialias)
-                return drawLine(img, toPixel(a.x), toPixel(a.y), toPixel(b.x), toPixel(b.y), stroke);
-            return drawCapsule(img, a, b, static_cast<float>(width) * 0.5f, stroke, s.antialias);
+            if (width == 1 && !s.antialias) {
+                if (!plan_.active())
+                    return drawLine(img, toPixel(a.x), toPixel(a.y), toPixel(b.x), toPixel(b.y), stroke);
+                // Exact copies move the original's pixels (a line drawn between the moved ends can round
+                // differently); other angles draw a line between the mapped ends.
+                for (std::size_t k = 0; k < copies; ++k)
+                    forEachCopyLinePixel(plan_, k, toPixel(a.x), toPixel(a.y), toPixel(b.x), toPixel(b.y),
+                                         [&](int x, int y) {
+                                             touched = unionOf(touched, fillRect(img, IRect{x, y, x + 1, y + 1}, stroke));
+                                         });
+                return touched;
+            }
+            for (std::size_t k = 0; k < copies; ++k)
+                touched = unionOf(touched, drawCapsule(img, copyCapsuleEnd(plan_, k, a, s.antialias),
+                                                       copyCapsuleEnd(plan_, k, b, s.antialias),
+                                                       static_cast<float>(width) * 0.5f, stroke, s.antialias));
+            return touched;
         }
 
         const IRect box = cornerBox(start_, end, ev.shift);
-        const IRect inner{box.x0 + width, box.y0 + width, box.x1 - width, box.y1 - width};
-        IRect touched;
+        const bool both = s.shapeMode == ShapeMode::Both;
+        const bool rect = id_ == ToolId::Rectangle;
 
-        if (id_ == ToolId::Rectangle) {
-            switch (s.shapeMode) {
-            case ShapeMode::Outline:
-                return strokeRect(img, box, width, stroke);
-            case ShapeMode::Filled:
-                return fillRect(img, box, stroke);
-            case ShapeMode::Both:
-                // The interior stops where the outline starts, so translucent colors never overlap.
-                touched = fillRect(img, inner, other);
-                return unionOf(touched, strokeRect(img, box, width, stroke));
+        // Interiors first (Both mode only), then the fill / outline of every copy.
+        if (both) {
+            for (std::size_t k = 0; k < copies; ++k) {
+                const IRect b = plan_.rect(k, box);
+                if (rect) {
+                    // The interior stops where the outline starts, so translucent colors never overlap.
+                    touched = unionOf(touched, fillRect(img, IRect{b.x0 + width, b.y0 + width, b.x1 - width, b.y1 - width}, other));
+                } else {
+                    touched = unionOf(touched, fillEllipse(img, b, other, width));
+                }
             }
         }
-
-        switch (s.shapeMode) {
-        case ShapeMode::Outline:
-            return strokeEllipse(img, box, width, stroke);
-        case ShapeMode::Filled:
-            return fillEllipse(img, box, stroke);
-        case ShapeMode::Both:
-            touched = fillEllipse(img, box, other, width);
-            return unionOf(touched, strokeEllipse(img, box, width, stroke));
+        for (std::size_t k = 0; k < copies; ++k) {
+            const IRect b = plan_.rect(k, box);
+            if (rect)
+                touched = unionOf(touched, s.shapeMode == ShapeMode::Filled ? fillRect(img, b, stroke)
+                                                                            : strokeRect(img, b, width, stroke));
+            else
+                touched = unionOf(touched, s.shapeMode == ShapeMode::Filled ? fillEllipse(img, b, stroke)
+                                                                            : strokeEllipse(img, b, width, stroke));
         }
-        return {};
+        return touched;
     }
 
     ToolId id_;
     bool active_ = false;
     Vec2f start_;
+    SymmetryPlan plan_;
 
     std::vector<Rgba8> snapshot_;
     bool hasSnapshot_ = false;

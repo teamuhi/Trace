@@ -12,23 +12,31 @@
 
 namespace trace {
 
-enum class ImageFormat { Png, Jpeg, Bmp, Tga, Gif };
+// Every file type a picture can be written as. Png..Gif can also be opened; Tiff, Ico, Qoi and Ppm are written
+// only. Svg, Pdf and Docx are pages that carry the picture (see io/image_extra.hpp): Svg embeds it, or draws one
+// rectangle per pixel run for pixel art, and Pdf and Docx put it on a page.
+enum class ImageFormat { Png, Jpeg, Bmp, Tga, Gif, Tiff, Ico, Qoi, Ppm, Svg, Pdf, Docx };
 
 // Every supported format, in the order the save dialog lists them.
-inline constexpr std::array<ImageFormat, 5> kAllFormats = {ImageFormat::Png, ImageFormat::Jpeg, ImageFormat::Bmp,
-                                                           ImageFormat::Tga, ImageFormat::Gif};
+inline constexpr std::array<ImageFormat, 12> kAllFormats = {
+    ImageFormat::Png, ImageFormat::Jpeg, ImageFormat::Bmp, ImageFormat::Tga,  ImageFormat::Gif,  ImageFormat::Tiff,
+    ImageFormat::Ico, ImageFormat::Qoi,  ImageFormat::Ppm, ImageFormat::Svg,  ImageFormat::Pdf,  ImageFormat::Docx};
+
+// The leading entries of kAllFormats that are pictures; the rest are pages (Pdf, Docx) that only flowcharts offer.
+inline constexpr std::size_t kPictureFormatCount = 10;
 
 inline constexpr int kMaxImageDimension = 16384;
 inline constexpr std::uintmax_t kMaxImageFileBytes = 512u * 1024u * 1024u;
 inline constexpr int kDefaultJpegQuality = 90;
 
-// The format named by the file extension (case-insensitive: png, jpg, jpeg, bmp, tga, gif).
+// The format named by the file extension (case-insensitive: png, jpg, jpeg, jpe, jfif, bmp, dib, tga, gif, tif, tiff,
+// ico, qoi, ppm, svg, pdf, docx).
 std::optional<ImageFormat> formatFromPath(const std::filesystem::path& path);
 
 const char* formatName(ImageFormat format);      // "PNG"
 const char* defaultExtension(ImageFormat format); // "png", without the dot
 
-// Whether the format can store transparency. GIF keeps only on/off transparency; JPEG keeps none.
+// Whether the format can store transparency. GIF keeps only on/off transparency; JPEG and PPM keep none.
 bool formatSupportsAlpha(ImageFormat format);
 
 struct LoadResult {
@@ -44,6 +52,8 @@ LoadResult loadImage(const std::filesystem::path& path);
 
 struct SaveOptions {
     int jpegQuality = kDefaultJpegQuality; // 1-100, used for JPEG only
+    int dpi = 96;                          // PDF and Word: how many pixels make an inch on the page
+    bool pixelArt = false;                 // SVG: one rectangle per pixel run instead of an embedded picture
 };
 
 // Decodes an image held in memory (for example from the clipboard) with the same rules and messages as
@@ -69,6 +79,23 @@ SaveTarget resolveSaveTarget(const std::filesystem::path& chosen, ImageFormat fa
 // file. Returns an empty string on success, otherwise a message fit to show the user; does not throw.
 std::string saveImage(const std::filesystem::path& path, const Image& image, ImageFormat format,
                       const SaveOptions& options = {});
+
+inline constexpr int kDefaultFrameDelayMs = 100; // for a GIF frame that gives no delay
+
+// The frames of an animated GIF (or the single picture of any other supported file).
+struct AnimationLoadResult {
+    std::vector<Image> frames;   // empty on failure
+    std::vector<int> delaysMs;   // one per frame; a frame with no delay given shows for 100 ms
+    int totalFrames = 1;         // frames in the file; more than frames.size() when the maxFrames limit cut it short
+    std::string error;           // a message fit to show the user when `frames` is empty
+};
+
+// Decodes every frame of a GIF held in memory, composited onto the full canvas as a browser shows it. Refused (with
+// a message) when the pictures would need more than `maxPixels` pixels in all, so this never allocates more than
+// that; at most `maxFrames` frames are decoded. A non-animated file gives one frame.
+AnimationLoadResult decodeAnimation(const std::vector<unsigned char>& bytes, const std::string& name,
+                                    std::size_t maxFrames, std::size_t maxPixels);
+AnimationLoadResult loadAnimation(const std::filesystem::path& path, std::size_t maxFrames, std::size_t maxPixels);
 
 // --- animated GIF ----------------------------------------------------------------------------------
 

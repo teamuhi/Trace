@@ -15,6 +15,9 @@ struct FileFormat {
     Str name;              // translated filter name, for example "PNG image"
     const char* patterns;  // extensions the dialog filter accepts, "jpg;jpeg"
     const char* extension; // appended to a name typed without one, "jpg"
+    // A copy of the document in another form (a picture of it) rather than the document itself: saving in it
+    // leaves the document's name and unsaved state as they were, and a pending Save is still owed.
+    bool exportOnly = false;
 };
 
 // One entry of the Open dialog's file type list (a catch-all "All files" entry is always added last).
@@ -42,6 +45,12 @@ public:
     // Starts from an empty document. Returns "" or a message fit to show the user; the document is untouched
     // on failure.
     virtual std::string newBlank() = 0;
+    // A different kind of blank document, numbered by the workspace (Paint: 1 is an endless whiteboard). Defaults to
+    // the usual one.
+    virtual std::string newBlankVariant(int variant) {
+        (void)variant;
+        return newBlank();
+    }
 
     struct LoadOutcome {
         std::string error;        // set on failure; the document is untouched
@@ -55,6 +64,9 @@ public:
     virtual std::optional<int> formatForPath(const std::filesystem::path& path) const = 0;
     // Whether saving in `format` asks for options first (the JPEG quality).
     virtual bool formatNeedsOptions(int /*format*/) const { return false; }
+    // True when save() in `format` only starts the work and reports its outcome itself later (the Flowchart draws
+    // its picture on the next frame), so the session must not announce a save.
+    virtual bool savesLater(int /*format*/) const { return false; }
     // Writes the document. Returns "" or a message fit to show the user.
     virtual std::string save(const std::filesystem::path& path, int format, const SaveOptions& options) = 0;
 
