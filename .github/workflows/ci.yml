@@ -105,8 +105,7 @@ jobs:
         shell: bash
         run: |
           annotate() { # title, then text on stdin
-            printf '::error title=%s::%s
-' "$1" "$(sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' | cut -c1-3500)"
+            printf '::error title=%s::%s\n' "$1" "$(sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' | cut -c1-3500)"
           }
           for log in configure build; do
             f="$RUNNER_TEMP/$log.log"
