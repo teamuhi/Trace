@@ -102,7 +102,9 @@ jobs:
 
       - name: Test
         shell: bash
-        run: ctest --preset ${{ matrix.preset }} --output-on-failure
+        run: |
+          set -o pipefail
+          ctest --preset ${{ matrix.preset }} --output-on-failure 2>&1 | tee "$RUNNER_TEMP/test.log"
 
       # Puts the first errors of a failed configure or build into annotations, where they show on the run summary.
       - name: Failure details
@@ -113,6 +115,10 @@ jobs:
           annotate() { # title, then text on stdin
             printf '::error title=%s::%s\n' "$1" "$(sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' | cut -c1-3500)"
           }
+          f="$RUNNER_TEMP/test.log" # doctest prints each failed test case with its assertion and values
+          if [ -f "$f" ]; then
+            grep -E "ERROR|TEST CASE|FAILED|with expansion|^  |Test +#" "$f" | head -60 | cut -c1-240 | annotate "test failures"
+          fi
           for log in configure build; do
             f="$RUNNER_TEMP/$log.log"
             [ -f "$f" ] || continue
