@@ -81,9 +81,9 @@ enum class LabelSide : std::uint8_t { On, Above, Below };
 
 // nullopt on a color means Auto: the theme decides on screen, the export background decides on export.
 struct Style {
-    std::optional<Rgba8> fill;
-    std::optional<Rgba8> stroke;
-    std::optional<Rgba8> textColor;
+    std::optional<Rgba8> fill{};
+    std::optional<Rgba8> stroke{};
+    std::optional<Rgba8> textColor{};
     float strokeWidth = 2.0f; // 0.5 .. 32
     Dash dash = Dash::Solid;
     float cornerRadius = 8.0f; // Rounded only, 0 .. 200
@@ -97,8 +97,8 @@ struct Node {
     NodeId id = kNoNode;
     NodeKind kind = NodeKind::Rectangle;
     Rect rect{0, 0, 160, 80};
-    std::string text;
-    Style style;
+    std::string text{};
+    Style style{};
     ImageId imageId = kNoImage; // Image nodes only
     NodeId parentId = kNoNode;  // the Container this node sits in
     GroupId groupId = kNoGroup;
@@ -110,26 +110,26 @@ struct Node {
 struct End {
     NodeId node = kNoNode; // kNoNode means a free point
     Face face = Face::Auto;
-    Pt point;              // used only when node == kNoNode
+    Pt point{};            // used only when node == kNoNode; initialized so End{node} is a complete initializer
     bool operator==(const End&) const = default;
 };
 
 struct Edge {
     EdgeId id = kNoEdge;
-    End from;
-    End to;
+    End from{};
+    End to{};
     Route route = Route::Curved;
     Arrow arrowStart = Arrow::None;
     Arrow arrowEnd = Arrow::Arrow;
-    std::string label;
+    std::string label{};
     // A hand-made route: nullopt = routed automatically. The offset is relative to the automatic route (the
     // midpoint of a Straight or Curved path, the middle segment of an Elbow one), so it follows the shapes when they
     // move. See flow_geometry.hpp for what each route does with it.
-    std::optional<Pt> via;
+    std::optional<Pt> via{};
     float labelPos = 0.5f;               // where along the line the label sits, 0 (start) .. 1 (end)
     LabelSide labelSide = LabelSide::On;
     bool labelAlong = false;             // the label turns with the line instead of staying horizontal
-    Style style; // stroke, strokeWidth, dash, textColor, fontSize are used
+    Style style{}; // stroke, strokeWidth, dash, textColor, fontSize are used
 };
 
 using ImagePtr = std::shared_ptr<const Image>;
