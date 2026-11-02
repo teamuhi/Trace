@@ -1,6 +1,8 @@
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdlib>
+#include <memory>
 #include <vector>
 
 #include "core/raster.hpp"

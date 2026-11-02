@@ -2,6 +2,7 @@
 
 #include <exception>
 #include <fstream>
+#include <functional>
 #include <new>
 #include <system_error>
 

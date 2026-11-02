@@ -1,6 +1,7 @@
 #include "tools/toolbox.hpp"
 
 #include <algorithm>
+#include <memory>
 #include <utility>
 
 #include "core/raster.hpp"

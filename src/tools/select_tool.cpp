@@ -1,4 +1,7 @@
 #include "tools/tool_factories.hpp"
+
+#include <memory>
+
 #include "tools/tool_util.hpp"
 
 namespace trace {

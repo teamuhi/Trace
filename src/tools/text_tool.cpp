@@ -1,6 +1,7 @@
 #include "tools/text_tool.hpp"
 
 #include <algorithm>
+#include <memory>
 #include <utility>
 
 #include "tools/tool_factories.hpp"

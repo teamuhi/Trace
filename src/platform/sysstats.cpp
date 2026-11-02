@@ -1,6 +1,7 @@
 #include "platform/sysstats.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <thread>
 
 namespace trace {
