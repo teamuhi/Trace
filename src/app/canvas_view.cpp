@@ -274,7 +274,7 @@ void CanvasView::fitBoard(Document& doc) {
 
 IRect CanvasView::visibleImageRect() const noexcept {
     // Panning is not bounded, so keep the numbers where converting them to int is defined.
-    constexpr float kLimit = 1.0e7f;
+    static constexpr float kLimit = 1.0e7f;
     const auto whole = [](float v, bool up) {
         const float c = std::clamp(std::isfinite(v) ? v : 0.0f, -kLimit, kLimit);
         return static_cast<int>(up ? std::ceil(c) : std::floor(c));

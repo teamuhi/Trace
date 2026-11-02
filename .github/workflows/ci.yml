@@ -87,7 +87,12 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          cmake --preset ${{ matrix.preset }} -DTRACE_WARNINGS_AS_ERRORS=ON 2>&1 | tee "$RUNNER_TEMP/configure.log"
+          # vcpkg downloads its build tools from public mirrors, which now and then time out: try again.
+          for attempt in 1 2 3; do
+            cmake --preset ${{ matrix.preset }} -DTRACE_WARNINGS_AS_ERRORS=ON 2>&1 | tee "$RUNNER_TEMP/configure.log" && exit 0
+            echo "Configure attempt $attempt failed"
+          done
+          exit 1
 
       - name: Build
         shell: bash

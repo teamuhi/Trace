@@ -143,12 +143,6 @@ void appendEscaped(std::string& s, std::u32string_view text) {
     }
 }
 
-std::string escaped(std::string_view text) {
-    std::string s;
-    appendEscaped(s, cleanText(text));
-    return s;
-}
-
 // The font-family attribute value: the user's name(s) first, then always a generic family. Escaped.
 std::string fontFamilyValue(const std::string& requested) {
     std::u32string f = cleanText(requested);
