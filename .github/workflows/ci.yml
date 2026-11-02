@@ -104,6 +104,7 @@ jobs:
         if: failure()
         shell: bash
         run: |
+          set +e +o pipefail # a log without a match must not end the step early
           annotate() { # title, then text on stdin
             printf '::error title=%s::%s\n' "$1" "$(sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' | cut -c1-3500)"
           }
@@ -111,9 +112,9 @@ jobs:
             f="$RUNNER_TEMP/$log.log"
             [ -f "$f" ] || continue
             grep -E "error|Error|fatal|FAILED|See logs" "$f" | head -12 | cut -c1-300 | annotate "$log errors"
-            # vcpkg names the log of a failed port build
-            grep -oE "[^ ]*buildtrees[^ ]*\.log" "$f" | sort -u | head -2 | while read -r l; do
-              [ -f "$l" ] && tail -n 25 "$l" | cut -c1-300 | annotate "$(basename "$l")"
+            # vcpkg names the logs of a failed port build; the configure/build ones hold the cause
+            grep -oE "[^ ]*buildtrees[^ ]*\.log" "$f" | grep -v cmake-get-vars | sort -u | head -3 | while read -r l; do
+              [ -f "$l" ] && tail -n 40 "$l" | cut -c1-300 | annotate "$(basename "$l")"
             done
           done
 
