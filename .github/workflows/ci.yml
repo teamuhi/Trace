@@ -85,15 +85,38 @@ jobs:
 
       - name: Configure
         shell: bash
-        run: cmake --preset ${{ matrix.preset }} -DTRACE_WARNINGS_AS_ERRORS=ON
+        run: |
+          set -o pipefail
+          cmake --preset ${{ matrix.preset }} -DTRACE_WARNINGS_AS_ERRORS=ON 2>&1 | tee "$RUNNER_TEMP/configure.log"
 
       - name: Build
         shell: bash
-        run: cmake --build --preset ${{ matrix.preset }}
+        run: |
+          set -o pipefail
+          cmake --build --preset ${{ matrix.preset }} 2>&1 | tee "$RUNNER_TEMP/build.log"
 
       - name: Test
         shell: bash
         run: ctest --preset ${{ matrix.preset }} --output-on-failure
+
+      # Puts the first errors of a failed configure or build into annotations, where they show on the run summary.
+      - name: Failure details
+        if: failure()
+        shell: bash
+        run: |
+          annotate() { # title, then text on stdin
+            printf '::error title=%s::%s
+' "$1" "$(sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' | cut -c1-3500)"
+          }
+          for log in configure build; do
+            f="$RUNNER_TEMP/$log.log"
+            [ -f "$f" ] || continue
+            grep -E "error|Error|fatal|FAILED|See logs" "$f" | head -12 | cut -c1-300 | annotate "$log errors"
+            # vcpkg names the log of a failed port build
+            grep -oE "[^ ]*buildtrees[^ ]*\.log" "$f" | sort -u | head -2 | while read -r l; do
+              [ -f "$l" ] && tail -n 25 "$l" | cut -c1-300 | annotate "$(basename "$l")"
+            done
+          done
 
       # A self-contained folder (program, libraries, languages, portable.txt), zipped so file permissions survive.
       - name: Package
