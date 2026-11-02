@@ -32,7 +32,6 @@ constexpr int kInitialHeight = 800;
 constexpr int kIdleTimeoutMs = 1000; // also bounds the CPU/RAM refresh latency while idle
 constexpr int kFramesPerEvent = 3;   // ImGui needs a few frames to settle after input
 constexpr auto kStatsInterval = std::chrono::seconds(1);
-constexpr float kBaseFontSize = 14.0f;
 
 Icon modeIcon(Mode mode) noexcept {
     switch (mode) {
