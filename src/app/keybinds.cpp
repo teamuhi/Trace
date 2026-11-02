@@ -41,7 +41,8 @@ constexpr KeyEntry kKeys[] = {
     {"Num*", ImGuiKey_KeypadMultiply}, {"Num/", ImGuiKey_KeypadDivide},
 };
 
-bool tableCoversAllTokens() {
+// Only called from an assert, which release builds drop.
+[[maybe_unused]] bool tableCoversAllTokens() {
     for (const char* token : chordKeyTokens()) {
         bool found = false;
         for (const KeyEntry& entry : kKeys)
