@@ -27,6 +27,9 @@ endif()
 add_library(trace_options INTERFACE)
 if(MSVC)
     target_compile_options(trace_options INTERFACE /W4 /permissive- /utf-8 /Zc:__cplusplus)
+    # C4702 (unreachable code) is only reported at link time with /LTCG, where a pragma around the include of a
+    # vendored header (nanosvg) does not reach it.
+    target_compile_options(trace_options INTERFACE /wd4702)
     # Release: full optimization, one section per function so the linker can drop what is unused.
     target_compile_options(trace_options INTERFACE $<$<CONFIG:Release>:/O2> $<$<CONFIG:Release>:/Gy> $<$<CONFIG:Release>:/Zc:inline>)
     target_link_options(trace_options INTERFACE $<$<CONFIG:Release>:/OPT:REF> $<$<CONFIG:Release>:/OPT:ICF>)

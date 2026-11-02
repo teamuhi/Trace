@@ -334,6 +334,12 @@ These are live in Flowchart mode only. The edit and view shortcuts above (Copy, 
 
 Fixed controls that cannot be rebound: mouse wheel scrolls (Shift for horizontal) and Ctrl+wheel zooms, middle-drag or Space + left drag pans, and Escape cancels the current shape or a pending key capture. Single-key shortcuts are ignored while a text field has focus.
 
+## Downloads and portable mode
+
+Each release on GitHub has a zip per platform. The Windows and Linux zips are **portable folders**: unzip anywhere and run `Trace.exe` (or `Trace`). The folder holds the program, the libraries it loads (`SDL3.dll` on Windows), the `languages` folder and a `portable.txt` file. While `portable.txt` sits next to the program, Trace keeps its settings, window layout and imported languages in a `data` folder beside it instead of the user profile, so the whole folder can be copied or moved (a USB stick, for example) with your setup. Delete `portable.txt` to go back to the normal per-user folder (`%APPDATA%\Trace\Trace` on Windows). If the folder is read-only (for example under `Program Files`), Trace falls back to the per-user folder. Settings > About shows which settings file is in use. The macOS zip holds the `Trace.app` bundle and has no portable mode.
+
+To build the folder yourself, build a release preset and run `cmake -DBUILD_DIR=build/windows-msvc-release -DOUT_DIR=Trace-portable -P cmake/PackagePortable.cmake`. Pushing a tag that starts with `v` (for example `v0.1.0`) builds all three platforms and publishes the release with these zips.
+
 ## Prerequisites
 
 All platforms need a C++20 compiler, CMake 3.25 or newer, Ninja and vcpkg.

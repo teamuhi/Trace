@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdio>
 #include <exception>
+#include <filesystem>
 #include <optional>
 #include <string>
 
@@ -49,6 +50,25 @@ Icon themeIcon(ThemeMode mode) noexcept {
     case ThemeMode::Dark: return Icon::DarkTheme;
     }
     return Icon::None;
+}
+
+// Portable mode: with a "portable.txt" next to the program, the settings, the window layout and imported
+// language packs live in a "data" folder beside it, so the folder can be moved or run from a USB stick without
+// touching the user profile. Returns that folder (UTF-8, ending in a separator), or "" for the normal per-user
+// folder: no marker, or the folder cannot be created (a read-only location).
+std::string portableDataDir() {
+    const char* base = SDL_GetBasePath();
+    if (!base)
+        return {};
+    const std::filesystem::path root = pathFromUtf8(base);
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(root / "portable.txt", ec))
+        return {};
+    const std::filesystem::path data = root / "data";
+    std::filesystem::create_directories(data, ec);
+    if (ec || !std::filesystem::is_directory(data, ec))
+        return {};
+    return utf8FromPath(data / "");
 }
 
 } // namespace
@@ -102,11 +122,18 @@ bool App::init() {
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_DockingEnable;
 
-    // Keep the window layout and settings in the per-user data directory instead of the working directory.
-    if (char* prefPath = SDL_GetPrefPath("Trace", "Trace")) {
-        iniPath_ = std::string(prefPath) + "imgui.ini";
-        settingsPath_ = std::string(prefPath) + "settings.ini";
-        SDL_free(prefPath);
+    // Keep the window layout and settings in the per-user data directory (or beside the program in portable mode)
+    // instead of the working directory.
+    std::string dataDir = portableDataDir();
+    if (dataDir.empty()) {
+        if (char* prefPath = SDL_GetPrefPath("Trace", "Trace")) {
+            dataDir = prefPath;
+            SDL_free(prefPath);
+        }
+    }
+    if (!dataDir.empty()) {
+        iniPath_ = dataDir + "imgui.ini";
+        settingsPath_ = dataDir + "settings.ini";
         io.IniFilename = iniPath_.c_str();
     } else {
         io.IniFilename = nullptr;

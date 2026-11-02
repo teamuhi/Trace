@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*'] # a version tag also publishes a release
   pull_request:
 
 concurrency:
@@ -19,10 +20,13 @@ jobs:
         include:
           - os: windows-latest
             preset: windows-msvc-release
+            asset: Trace-windows-x64-portable
           - os: ubuntu-latest
             preset: linux-clang-release
+            asset: Trace-linux-x64-portable
           - os: macos-latest
             preset: macos-clang-release
+            asset: Trace-macos-arm64
 
     env:
       VCPKG_ROOT: ${{ github.workspace }}/vcpkg
@@ -91,13 +95,37 @@ jobs:
         shell: bash
         run: ctest --preset ${{ matrix.preset }} --output-on-failure
 
+      # A self-contained folder (program, libraries, languages, portable.txt), zipped so file permissions survive.
+      - name: Package
+        shell: bash
+        run: |
+          cmake -DBUILD_DIR="build/${{ matrix.preset }}" -DOUT_DIR="${{ matrix.asset }}" -P cmake/PackagePortable.cmake
+          cmake -E tar cf "${{ matrix.asset }}.zip" --format=zip "${{ matrix.asset }}"
+
       - name: Upload build
         uses: actions/upload-artifact@v4
         with:
-          name: Trace-${{ matrix.os }}
-          path: |
-            build/${{ matrix.preset }}/Trace
-            build/${{ matrix.preset }}/Trace.exe
-            build/${{ matrix.preset }}/Trace.app
-          if-no-files-found: warn
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}.zip
+          if-no-files-found: error
           retention-days: 14
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l dist
+          gh release create "$GITHUB_REF_NAME" dist/*.zip --repo "$GITHUB_REPOSITORY" --title "Trace $GITHUB_REF_NAME" --generate-notes
