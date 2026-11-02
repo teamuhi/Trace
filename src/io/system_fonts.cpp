@@ -111,19 +111,25 @@ std::vector<SystemFont> scanFontFiles(std::span<const fs::path> directories) {
         std::error_code ec;
         if (!fs::is_directory(dir, ec))
             continue;
+        // Directory order differs between file systems; reading the files in path order makes the copy that wins
+        // among fonts with the same family and style the same everywhere.
+        std::vector<fs::path> files;
         fs::recursive_directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec);
-        for (; !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        for (; !ec && it != fs::recursive_directory_iterator() && files.size() <= kMaxFontFiles; it.increment(ec)) {
             std::error_code fileEc;
-            if (!it->is_regular_file(fileEc) || fileEc || !isFontFile(it->path()))
-                continue;
+            if (it->is_regular_file(fileEc) && !fileEc && isFontFile(it->path()))
+                files.push_back(it->path());
+        }
+        std::sort(files.begin(), files.end());
+        for (const fs::path& file : files) {
             if (++looked > kMaxFontFiles)
                 break;
             FontNames names;
-            if (!readNames(it->path(), names))
+            if (!readNames(file, names))
                 continue;
             if (!seen.insert(lowerAscii(names.family) + "\n" + lowerAscii(names.style)).second)
                 continue;
-            fonts.push_back(SystemFont{std::move(names.family), std::move(names.style), utf8FromPath(it->path())});
+            fonts.push_back(SystemFont{std::move(names.family), std::move(names.style), utf8FromPath(file)});
         }
         if (looked > kMaxFontFiles)
             break;
