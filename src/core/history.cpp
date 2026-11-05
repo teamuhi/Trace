@@ -10,22 +10,8 @@ namespace trace {
 
 namespace {
 
-bool sameSize(const Image& a, const Image& b) noexcept {
+bool sameSize(const Image& a, const SparseImage& b) noexcept {
     return a.width() == b.width() && a.height() == b.height();
-}
-
-bool rowsEqual(const Image& a, const Image& b, int y, int x0, int count) noexcept {
-    const std::span<const Rgba8> ra = a.row(y);
-    const std::span<const Rgba8> rb = b.row(y);
-    return std::memcmp(ra.data() + x0, rb.data() + x0, static_cast<std::size_t>(count) * sizeof(Rgba8)) == 0;
-}
-
-bool tileDiffers(const Image& a, const Image& b, int x0, int y0, int w, int h) noexcept {
-    for (int y = y0; y < y0 + h; ++y) {
-        if (!rowsEqual(a, b, y, x0, w))
-            return true;
-    }
-    return false;
 }
 
 std::size_t imageBytes(const Image& img) noexcept {
@@ -99,7 +85,7 @@ std::optional<History::StepInfo> History::peekRedo() const noexcept {
     return StepInfo{step.structure ? StepKind::Structure : step.whole ? StepKind::Replace : StepKind::Pixels, step.cel};
 }
 
-bool History::commit(const Image& current, Image& reference, const IRect& region, CelId cel) {
+bool History::commit(const Image& current, SparseImage& reference, const IRect& region, CelId cel) {
     if (!sameSize(current, reference) || current.empty() || !fits(current))
         return false;
     const IRect r = intersectionOf(region, IRect{0, 0, current.width(), current.height()});
@@ -114,29 +100,26 @@ bool History::commit(const Image& current, Image& reference, const IRect& region
             const int y0 = ty * T;
             const int w = std::min(T, current.width() - x0);
             const int h = std::min(T, current.height() - y0);
-            if (!tileDiffers(current, reference, x0, y0, w, h))
+            if (reference.equalsRect(current, x0, y0, w, h))
                 continue;
 
             Tile tile{x0, y0, w, h, {}};
-            tile.pixels.reserve(static_cast<std::size_t>(w) * static_cast<std::size_t>(h));
-            for (int y = y0; y < y0 + h; ++y) {
-                const std::span<const Rgba8> before = reference.row(y);
-                tile.pixels.insert(tile.pixels.end(), before.begin() + x0, before.begin() + x0 + w);
-            }
+            tile.pixels.resize(static_cast<std::size_t>(w) * static_cast<std::size_t>(h));
+            reference.copyRect(x0, y0, w, h, tile.pixels.data());
             step.bytes += tile.pixels.size() * sizeof(Rgba8);
             step.tiles.push_back(std::move(tile));
         }
     }
     if (step.tiles.empty())
         return false;
-    steps_.reserve(cursor_ + 1); // the last step that can throw: everything below only mutates
+    steps_.reserve(cursor_ + 1);
+    // Room for the new pixels in the baseline comes first (the last thing that can throw), so that updating it below
+    // cannot fail halfway.
+    for (const Tile& tile : step.tiles)
+        reference.reserveRect(tile.x, tile.y, tile.width, tile.height);
 
-    for (const Tile& tile : step.tiles) {
-        for (int y = tile.y; y < tile.y + tile.height; ++y) {
-            const std::span<const Rgba8> after = current.row(y);
-            std::copy(after.begin() + tile.x, after.begin() + tile.x + tile.width, reference.row(y).begin() + tile.x);
-        }
-    }
+    for (const Tile& tile : step.tiles)
+        reference.assignRect(current, tile.x, tile.y, tile.width, tile.height);
 
     // A new edit forks the timeline: anything that could have been redone is gone, and so is a saved state
     // that lived in that discarded future.
@@ -152,11 +135,12 @@ bool History::commit(const Image& current, Image& reference, const IRect& region
     return true;
 }
 
-bool History::commitReplace(Image& current, Image& reference, Image next, CelId cel) {
+bool History::commitReplace(Image& current, SparseImage& reference, Image next, CelId cel) {
     if (!sameSize(current, reference) || current.empty() || next.empty() || !fits(current))
         return false;
 
-    Image nextReference = next; // everything that can throw happens before anything changes
+    SparseImage nextReference(next); // everything that can throw happens before anything changes
+    Image before = reference.toImage();
     steps_.reserve(cursor_ + 1);
 
     Step step;
@@ -165,8 +149,8 @@ bool History::commitReplace(Image& current, Image& reference, Image next, CelId 
     step.height = next.height();
     step.beforeWidth = reference.width();
     step.beforeHeight = reference.height();
-    step.bytes = imageBytes(reference);
-    step.whole = std::move(reference);
+    step.bytes = imageBytes(before);
+    step.whole = std::move(before);
     reference = std::move(nextReference);
     current = std::move(next);
 
@@ -181,11 +165,11 @@ bool History::commitReplace(Image& current, Image& reference, Image next, CelId 
 std::size_t History::structureBytes(const StructureData& data) noexcept {
     std::size_t bytes = data.before.approxBytes() + data.after.approxBytes() + sizeof(StructureData);
     for (const auto& [id, img] : data.held)
-        bytes += imageBytes(img) + sizeof(id);
+        bytes += img.bytes() + sizeof(id);
     return bytes;
 }
 
-bool History::commitStructure(CelStore& store, Image& reference, Layout next, CelPool added) {
+bool History::commitStructure(CelStore& store, SparseImage& reference, Layout next, CelPool added) {
     Image* active = store.activeImage();
     if (!active || active->empty() || !sameSize(*active, reference) || !fits(*active))
         return false;
@@ -228,14 +212,18 @@ bool History::commitStructure(CelStore& store, Image& reference, Layout next, Ce
     const int nextHeight = nextActive->height();
 
     // Everything that can throw happens before anything changes.
-    Image newReference;
+    SparseImage newReference;
     if (activeChanges)
-        newReference = *nextActive;
+        newReference = SparseImage(*nextActive);
     auto data = std::make_unique<StructureData>();
     data->before = store.layout;
     data->after = next;
     data->added = std::move(addedIds);
     data->removed = std::move(removedIds);
+    // The cels that leave the document are kept without their blank tiles: a whiteboard that grew leaves its old
+    // (mostly empty) cel behind, which as a dense copy would be one more full board in memory.
+    for (const CelId id : data->removed)
+        data->held.emplace(id, SparseImage(store.pool.at(id)));
     steps_.reserve(cursor_ + 1);
 
     Step step;
@@ -244,9 +232,9 @@ bool History::commitStructure(CelStore& store, Image& reference, Layout next, Ce
     step.beforeWidth = reference.width();
     step.beforeHeight = reference.height();
 
-    // From here on nothing throws: cels move between maps as nodes.
+    // From here on nothing throws.
     for (const CelId id : data->removed)
-        data->held.insert(store.pool.extract(id));
+        store.pool.erase(id);
     store.pool.merge(added);
     store.layout = std::move(next);
     if (activeChanges)
@@ -262,7 +250,7 @@ bool History::commitStructure(CelStore& store, Image& reference, Layout next, Ce
     return true;
 }
 
-IRect History::swapStructure(Step& step, bool undoing, CelStore& store, Image& reference) {
+IRect History::swapStructure(Step& step, bool undoing, CelStore& store, SparseImage& reference) {
     StructureData& data = *step.structure;
     const Layout& target = undoing ? data.before : data.after;
     const std::vector<CelId>& leaving = undoing ? data.added : data.removed;   // go from the pool into the step
@@ -289,21 +277,34 @@ IRect History::swapStructure(Step& step, bool undoing, CelStore& store, Image& r
     const CelId nextActiveId = next.activeCel();
     const bool activeChanges = nextActiveId != store.layout.activeCel();
 
-    Image newReference;
+    SparseImage newReference;
     if (activeChanges) {
         const auto inHeld = data.held.find(nextActiveId);
         const auto inPool = store.pool.find(nextActiveId);
-        const Image* source = inHeld != data.held.end() ? &inHeld->second : inPool != store.pool.end() ? &inPool->second : nullptr;
-        if (!source || source->empty())
+        if (inHeld != data.held.end() && !inHeld->second.empty())
+            newReference = inHeld->second;
+        else if (inPool != store.pool.end() && !inPool->second.empty())
+            newReference = SparseImage(inPool->second);
+        else
             return {};
-        newReference = *source;
     }
+
+    // Everything that can run out of memory comes first: the cels going into the step are stored without their blank
+    // tiles, and the ones coming back are expanded into images.
+    std::map<CelId, SparseImage> toHold;
+    for (const CelId id : leaving)
+        toHold.emplace(id, SparseImage(store.pool.at(id)));
+    CelPool toRestore;
+    for (const CelId id : entering)
+        toRestore.emplace(id, data.held.at(id).toImage());
 
     // Nothing below throws.
     for (const CelId id : leaving)
-        data.held.insert(store.pool.extract(id));
+        store.pool.erase(id);
     for (const CelId id : entering)
-        store.pool.insert(data.held.extract(id));
+        data.held.erase(id);
+    data.held.merge(toHold);
+    store.pool.merge(toRestore);
     store.layout = std::move(next);
     if (activeChanges)
         reference = std::move(newReference);
@@ -316,8 +317,8 @@ IRect History::swapStructure(Step& step, bool undoing, CelStore& store, Image& r
 
 // Exchanges the image with the one the step holds. The copy for `reference` is made first, so a failed
 // allocation leaves everything as it was.
-IRect History::swapWhole(Step& step, Image& current, Image& reference) {
-    Image other = *step.whole;
+IRect History::swapWhole(Step& step, Image& current, SparseImage& reference) {
+    SparseImage other(*step.whole); // the image that is about to become current; made first, it can throw
     std::swap(current, *step.whole);
     reference = std::move(other);
     bytes_ = bytes_ - step.bytes + imageBytes(*step.whole);
@@ -325,22 +326,24 @@ IRect History::swapWhole(Step& step, Image& current, Image& reference) {
     return IRect{0, 0, current.width(), current.height()};
 }
 
-IRect History::swapWithImage(Step& step, Image& current, Image& reference) {
+IRect History::swapWithImage(Step& step, Image& current, SparseImage& reference) {
+    // The baseline gets its room first, so that nothing can run out of memory once pixels start to move.
+    for (const Tile& tile : step.tiles)
+        reference.reserveRect(tile.x, tile.y, tile.width, tile.height);
     IRect changed;
     for (Tile& tile : step.tiles) {
         for (int row = 0; row < tile.height; ++row) {
             Rgba8* stored = tile.pixels.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(tile.width);
             const std::span<Rgba8> line = current.row(tile.y + row);
             std::swap_ranges(stored, stored + tile.width, line.begin() + tile.x);
-            std::copy(line.begin() + tile.x, line.begin() + tile.x + tile.width,
-                      reference.row(tile.y + row).begin() + tile.x);
         }
+        reference.assignRect(current, tile.x, tile.y, tile.width, tile.height);
         changed = unionOf(changed, IRect{tile.x, tile.y, tile.x + tile.width, tile.y + tile.height});
     }
     return changed;
 }
 
-IRect History::undo(Image& current, Image& reference) {
+IRect History::undo(Image& current, SparseImage& reference) {
     if (!canUndo() || !sameSize(current, reference) || !fits(current) || steps_[cursor_ - 1].structure)
         return {};
     Step& step = steps_[cursor_ - 1];
@@ -349,7 +352,7 @@ IRect History::undo(Image& current, Image& reference) {
     return changed;
 }
 
-IRect History::redo(Image& current, Image& reference) {
+IRect History::redo(Image& current, SparseImage& reference) {
     if (!canRedo() || !sameSize(current, reference) || !fits(current) || steps_[cursor_].structure)
         return {};
     Step& step = steps_[cursor_];
@@ -358,7 +361,7 @@ IRect History::redo(Image& current, Image& reference) {
     return changed;
 }
 
-IRect History::applyStep(bool undoing, CelStore& store, Image& reference) {
+IRect History::applyStep(bool undoing, CelStore& store, SparseImage& reference) {
     if (undoing ? !canUndo() : !canRedo())
         return {};
     Step& step = steps_[undoing ? cursor_ - 1 : cursor_];
@@ -382,11 +385,11 @@ IRect History::applyStep(bool undoing, CelStore& store, Image& reference) {
     return changed;
 }
 
-IRect History::undo(CelStore& store, Image& reference) {
+IRect History::undo(CelStore& store, SparseImage& reference) {
     return applyStep(true, store, reference);
 }
 
-IRect History::redo(CelStore& store, Image& reference) {
+IRect History::redo(CelStore& store, SparseImage& reference) {
     return applyStep(false, store, reference);
 }
 

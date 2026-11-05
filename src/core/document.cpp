@@ -107,7 +107,7 @@ void Document::load(Image image) {
     fresh.layout.frames.push_back(FrameInfo{});
     fresh.layout.grid.push_back(1);
     fresh.pool.emplace(1, std::move(image));
-    Image reference = fresh.pool.begin()->second;
+    SparseImage reference(fresh.pool.begin()->second);
 
     store_ = std::move(fresh);
     committed_ = std::move(reference);
@@ -177,9 +177,9 @@ bool Document::loadStore(CelStore store) {
     if (ids.back() == UINT32_MAX || maxLayerId == UINT32_MAX)
         return false;
 
-    Image reference;
+    SparseImage reference;
     try {
-        reference = store.pool.at(layout.activeCel()); // the only allocation; nothing has changed yet
+        reference = SparseImage(store.pool.at(layout.activeCel())); // the only allocation; nothing has changed yet
     } catch (const std::bad_alloc&) {
         return false;
     }
@@ -566,9 +566,9 @@ Document::OpResult Document::setActive(int layer, int frame) {
     if (target == store_.pool.end())
         return OpResult::Nothing;
 
-    Image reference;
+    SparseImage reference;
     try {
-        reference = target->second; // the baseline for the new cel; the only step that can throw
+        reference = SparseImage(target->second); // the baseline for the new cel; the only step that can throw
     } catch (const std::bad_alloc&) {
         return OpResult::NoMemory;
     }

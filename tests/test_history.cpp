@@ -19,6 +19,10 @@ std::vector<Rgba8> pixelsOf(const Image& img) {
     return std::vector<Rgba8>(img.pixels().begin(), img.pixels().end());
 }
 
+std::vector<Rgba8> pixelsOf(const SparseImage& img) {
+    return pixelsOf(img.toImage());
+}
+
 // Paints a rectangle straight into the document and reports it, like a tool would.
 void paint(Document& doc, IRect r, Rgba8 color) {
     for (int y = r.y0; y < r.y1; ++y)
@@ -35,7 +39,7 @@ constexpr std::size_t kTileBytes = History::kTileSize * History::kTileSize * siz
 
 TEST_CASE("History records only the tiles that changed") {
     Image image(200, 200, kWhite);
-    Image reference = image;
+    SparseImage reference(image);
     History history;
 
     image.set(10, 10, kBlack); // tile (0, 0)
@@ -46,7 +50,7 @@ TEST_CASE("History records only the tiles that changed") {
 
 TEST_CASE("History stores pixels touching a tile border in both tiles") {
     Image image(200, 200, kWhite);
-    Image reference = image;
+    SparseImage reference(image);
     History history;
 
     image.set(63, 63, kBlack);
@@ -55,7 +59,7 @@ TEST_CASE("History stores pixels touching a tile border in both tiles") {
     CHECK(history.bytes() == 2 * kTileBytes);   // tiles (0,0) and (1,1)
 
     Image image2(200, 200, kWhite);
-    Image reference2 = image2;
+    SparseImage reference2(image2);
     History h2;
     for (const int x : {63, 64})
         image2.set(x, 10, kBlack);
@@ -65,7 +69,7 @@ TEST_CASE("History stores pixels touching a tile border in both tiles") {
 
 TEST_CASE("Undo and redo restore the exact pixels") {
     Image image(150, 100, kWhite);
-    Image reference = image;
+    SparseImage reference(image);
     History history;
     const std::vector<Rgba8> original = pixelsOf(image);
 
@@ -90,7 +94,7 @@ TEST_CASE("Undo and redo restore the exact pixels") {
 
 TEST_CASE("Edge tiles smaller than a full tile round-trip") {
     Image image(70, 70, kWhite); // the last tile row and column are 6 pixels wide
-    Image reference = image;
+    SparseImage reference(image);
     History history;
 
     image.set(69, 69, kRed);
@@ -108,7 +112,7 @@ TEST_CASE("Edge tiles smaller than a full tile round-trip") {
 
 TEST_CASE("A long sequence undoes back to every earlier state and forward again") {
     Image image(130, 130, kWhite);
-    Image reference = image;
+    SparseImage reference(image);
     History history;
 
     std::vector<std::vector<Rgba8>> states{pixelsOf(image)};
@@ -134,7 +138,7 @@ TEST_CASE("A long sequence undoes back to every earlier state and forward again"
 
 TEST_CASE("Committing nothing records nothing") {
     Image image(100, 100, kWhite);
-    Image reference = image;
+    SparseImage reference(image);
     History history;
 
     CHECK_FALSE(history.commit(image, reference, IRect{0, 0, 100, 100}));
@@ -146,7 +150,7 @@ TEST_CASE("Committing nothing records nothing") {
 
 TEST_CASE("Changes outside the committed region are left for a later commit") {
     Image image(200, 200, kWhite);
-    Image reference = image;
+    SparseImage reference(image);
     History history;
 
     image.set(5, 5, kRed);
@@ -160,7 +164,7 @@ TEST_CASE("Changes outside the committed region are left for a later commit") {
 
 TEST_CASE("A new commit after an undo discards the redo steps") {
     Image image(100, 100, kWhite);
-    Image reference = image;
+    SparseImage reference(image);
     History history;
 
     image.set(1, 1, kRed);
@@ -180,7 +184,7 @@ TEST_CASE("A new commit after an undo discards the redo steps") {
 
 TEST_CASE("After undo the reference matches the image, so the next commit sees only new edits") {
     Image image(100, 100, kWhite);
-    Image reference = image;
+    SparseImage reference(image);
     History history;
 
     image.set(5, 5, kRed);
@@ -191,7 +195,7 @@ TEST_CASE("After undo the reference matches the image, so the next commit sees o
 
 TEST_CASE("Memory limit evicts the oldest steps but keeps the newest") {
     Image image(100, 100, kWhite);
-    Image reference = image;
+    SparseImage reference(image);
     History history(2 * kTileBytes);
 
     for (int i = 0; i < 6; ++i) {
@@ -209,7 +213,7 @@ TEST_CASE("Memory limit evicts the oldest steps but keeps the newest") {
 
 TEST_CASE("A single step larger than the limit is still kept") {
     Image image(200, 200, kWhite);
-    Image reference = image;
+    SparseImage reference(image);
     History history(1); // absurdly small
 
     for (int y = 0; y < 200; ++y)
@@ -223,7 +227,7 @@ TEST_CASE("A single step larger than the limit is still kept") {
 
 TEST_CASE("Lowering the limit evicts immediately") {
     Image image(100, 100, kWhite);
-    Image reference = image;
+    SparseImage reference(image);
     History history;
     for (int i = 0; i < 5; ++i) {
         image.set(5, 5, Rgba8{static_cast<std::uint8_t>(i + 1), 0, 0, 255});
@@ -235,7 +239,7 @@ TEST_CASE("Lowering the limit evicts immediately") {
 
 TEST_CASE("Saved state tracking follows undo, redo, forks and eviction") {
     Image image(100, 100, kWhite);
-    Image reference = image;
+    SparseImage reference(image);
     History history;
     CHECK(history.atSavedState());
 
@@ -264,7 +268,7 @@ TEST_CASE("Saved state tracking follows undo, redo, forks and eviction") {
 
 TEST_CASE("Saved state is lost when eviction drops the step leading back to it") {
     Image image(100, 100, kWhite);
-    Image reference = image;
+    SparseImage reference(image);
     History history(2 * kTileBytes);
     history.markSaved(); // saved at the very beginning
 
@@ -279,7 +283,7 @@ TEST_CASE("Saved state is lost when eviction drops the step leading back to it")
 
 TEST_CASE("clear forgets everything and the current state counts as saved") {
     Image image(100, 100, kWhite);
-    Image reference = image;
+    SparseImage reference(image);
     History history;
     image.set(1, 1, kRed);
     history.commit(image, reference, IRect{0, 0, 100, 100});
@@ -291,17 +295,17 @@ TEST_CASE("clear forgets everything and the current state counts as saved") {
 
 TEST_CASE("Mismatched image sizes are refused instead of corrupting memory") {
     Image a(100, 100, kWhite);
-    Image b(50, 50, kWhite);
+    SparseImage b{Image(50, 50, kWhite)};
     History history;
     a.set(1, 1, kRed);
     CHECK_FALSE(history.commit(a, b, IRect{0, 0, 100, 100}));
 
     Image c(100, 100, kWhite);
-    Image d = c;
+    SparseImage d(c);
     c.set(1, 1, kRed);
     history.commit(c, d, IRect{0, 0, 100, 100});
     Image small(10, 10, kWhite);
-    Image smallRef = small;
+    SparseImage smallRef(small);
     CHECK(history.undo(small, smallRef).empty());
     CHECK(history.undoCount() == 1);
 }

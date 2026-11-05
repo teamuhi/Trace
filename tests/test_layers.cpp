@@ -846,9 +846,10 @@ TEST_CASE("Structure steps count toward the memory limit and are evicted oldest 
     Document doc(side, side, kRed);
     doc.setHistoryLimit(3 * side * side * sizeof(Rgba8));
 
-    // Each deleteLayer keeps one 16 KB cel in its step (plus a little layout data).
+    // Each deleteLayer keeps one 16 KB cel in its step (plus a little layout data). The layers are copies of a drawn one:
+    // a blank cel is held without its blank tiles and would cost nothing.
     for (int i = 0; i < 8; ++i) {
-        REQUIRE(doc.addLayer() == Result::Applied);
+        REQUIRE(doc.duplicateLayer(0) == Result::Applied);
         REQUIRE(doc.deleteLayer(0) == Result::Applied);
     }
     CHECK(doc.history().bytes() <= 3 * side * side * sizeof(Rgba8) + 4096);
@@ -865,7 +866,7 @@ TEST_CASE("Structure steps count toward the memory limit and are evicted oldest 
 
     // The newest step is kept even when it alone exceeds the limit.
     doc.setHistoryLimit(1);
-    REQUIRE(doc.addLayer() == Result::Applied);
+    REQUIRE(doc.duplicateLayer(0) == Result::Applied);
     REQUIRE(doc.deleteLayer(0) == Result::Applied);
     CHECK(doc.history().undoCount() == 1);
     REQUIRE(doc.undo());
@@ -873,7 +874,7 @@ TEST_CASE("Structure steps count toward the memory limit and are evicted oldest 
 
 TEST_CASE("Structure step bytes follow what the step holds when it is undone and redone") {
     Document doc(32, 32, kRed);
-    doc.addLayer();
+    doc.duplicateLayer(0); // a drawn cel: held cels are stored without their blank tiles, so a blank one is almost free
     const std::size_t afterAdd = doc.history().bytes();
     doc.deleteLayer(1); // holds the added layer's cel
     const std::size_t afterDelete = doc.history().bytes();
@@ -905,7 +906,7 @@ TEST_CASE("History rejects structure commits that do not add up and changes noth
     store.layout.frames.push_back(FrameInfo{});
     store.layout.grid.push_back(1);
     store.pool.emplace(1, Image(4, 4, kRed));
-    Image reference = store.pool.at(1);
+    SparseImage reference(store.pool.at(1));
     History history;
 
     Layout next = store.layout;
@@ -956,7 +957,7 @@ TEST_CASE("Pixel steps record their cel and refuse to apply on another one") {
     store.layout.grid = {1, 2};
     store.pool.emplace(1, Image(4, 4, kRed));
     store.pool.emplace(2, Image(4, 4, kBlue));
-    Image reference = store.pool.at(1);
+    SparseImage reference(store.pool.at(1));
     History history;
 
     store.pool.at(1).set(0, 0, kGreen);
@@ -965,7 +966,7 @@ TEST_CASE("Pixel steps record their cel and refuse to apply on another one") {
     CHECK(history.peekUndo()->kind == History::StepKind::Pixels);
 
     store.layout.activeLayer = 1;
-    Image otherReference = store.pool.at(2);
+    SparseImage otherReference(store.pool.at(2));
     CHECK(history.undo(store, otherReference).empty()); // active cel is 2
     CHECK(store.pool.at(1).get(0, 0) == kGreen);
 

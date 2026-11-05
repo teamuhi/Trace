@@ -9,6 +9,7 @@
 #include "core/dirty_rect.hpp"
 #include "core/guides.hpp"
 #include "core/history.hpp"
+#include "core/sparse_image.hpp"
 #include "core/image.hpp"
 #include "core/selection.hpp"
 #include "core/transform.hpp"
@@ -248,7 +249,7 @@ private:
 
     Selection selection_;
     Guides guides_;
-    Image committed_; // the active cel as of the last commit; the baseline commit() diffs against
+    SparseImage committed_; // the active cel as of the last commit (blank tiles not stored); the baseline commit() diffs against
     DirtyRegion upload_;
     DirtyRegion edits_;
     History history_;

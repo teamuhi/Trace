@@ -21,6 +21,10 @@ std::vector<Rgba8> pixelsOf(const Image& img) {
     return std::vector<Rgba8>(img.pixels().begin(), img.pixels().end());
 }
 
+std::vector<Rgba8> pixelsOf(const SparseImage& img) {
+    return pixelsOf(img.toImage());
+}
+
 void paint(Document& doc, IRect r, Rgba8 color) {
     for (int y = r.y0; y < r.y1; ++y)
         for (int x = r.x0; x < r.x1; ++x)
@@ -41,7 +45,7 @@ PointerEvent at(float x, float y, float snapRadius = 0.0f) {
 
 TEST_CASE("commitReplace can be undone and redone, in both directions of size") {
     Image current(8, 6, kRed);
-    Image reference = current;
+    SparseImage reference(current);
     const Image original = current;
     History history;
 
@@ -66,7 +70,7 @@ TEST_CASE("commitReplace can be undone and redone, in both directions of size") 
 
 TEST_CASE("Pixel steps and replace steps interleave through undo and redo") {
     Image current(10, 10, kWhite);
-    Image reference = current;
+    SparseImage reference(current);
     History history;
 
     // 1: paint a pixel   2: shrink   3: paint a pixel on the small image
@@ -97,7 +101,7 @@ TEST_CASE("Pixel steps and replace steps interleave through undo and redo") {
 
 TEST_CASE("A new commit after undoing a replace discards the redo steps") {
     Image current(6, 6, kWhite);
-    Image reference = current;
+    SparseImage reference(current);
     History history;
     REQUIRE(history.commitReplace(current, reference, Image(2, 2, kRed)));
     history.undo(current, reference);
@@ -110,13 +114,13 @@ TEST_CASE("A new commit after undoing a replace discards the redo steps") {
 
 TEST_CASE("History refuses commits that do not match the image size at its position") {
     Image current(6, 6, kWhite);
-    Image reference = current;
+    SparseImage reference(current);
     History history;
     REQUIRE(history.commitReplace(current, reference, Image(2, 2, kRed)));
 
     // An image of the old size cannot be committed while the history is at the 2 x 2 state.
     Image wrong(6, 6, kWhite);
-    Image wrongReference = wrong;
+    SparseImage wrongReference(wrong);
     wrong.set(0, 0, kBlack);
     CHECK_FALSE(history.commit(wrong, wrongReference, IRect{0, 0, 6, 6}));
     CHECK_FALSE(history.commitReplace(wrong, wrongReference, Image(3, 3, kRed)));
@@ -128,11 +132,11 @@ TEST_CASE("History refuses commits that do not match the image size at its posit
 
 TEST_CASE("commitReplace needs matching images and a non-empty result") {
     Image current(4, 4, kWhite);
-    Image reference(5, 5, kWhite);
+    SparseImage reference{Image(5, 5, kWhite)};
     History history;
     CHECK_FALSE(history.commitReplace(current, reference, Image(2, 2)));
 
-    Image same = current;
+    SparseImage same(current);
     CHECK_FALSE(history.commitReplace(current, same, Image()));
     CHECK(current.width() == 4);
     CHECK_FALSE(history.canUndo());
@@ -140,7 +144,7 @@ TEST_CASE("commitReplace needs matching images and a non-empty result") {
 
 TEST_CASE("Replace steps count their memory and are evicted oldest first") {
     Image current(100, 100, kWhite);
-    Image reference = current;
+    SparseImage reference(current);
     History history(100 * 100 * sizeof(Rgba8) + 1000); // room for about one 100 x 100 image
 
     REQUIRE(history.commitReplace(current, reference, Image(100, 100, kRed)));
@@ -157,7 +161,7 @@ TEST_CASE("Replace steps count their memory and are evicted oldest first") {
 
 TEST_CASE("Bytes stay correct when a replace step swaps sizes") {
     Image current(100, 100, kWhite);
-    Image reference = current;
+    SparseImage reference(current);
     History history;
     REQUIRE(history.commitReplace(current, reference, Image(10, 10, kRed)));
     CHECK(history.bytes() == 100 * 100 * sizeof(Rgba8)); // the step holds the old, big image
@@ -169,7 +173,7 @@ TEST_CASE("Bytes stay correct when a replace step swaps sizes") {
 
 TEST_CASE("The saved state survives a replace step") {
     Image current(6, 6, kWhite);
-    Image reference = current;
+    SparseImage reference(current);
     History history;
     history.markSaved();
     REQUIRE(history.commitReplace(current, reference, Image(3, 3, kRed)));

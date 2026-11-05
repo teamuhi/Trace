@@ -137,6 +137,44 @@ TEST_CASE("Capsule far outside the image paints nothing and does not overflow") 
     CHECK(count(img, kWhite) == 64);
 }
 
+// The capsule only visits the pixels each row can reach; that must not change which pixels are painted, whatever the
+// slope (a long fast stroke on a zoomed-out board is one very long segment).
+TEST_CASE("Capsule paints exactly the pixels within the radius of the segment, at any slope") {
+    constexpr int kSize = 160;
+    const float radius = 3.5f;
+    const Vec2f ends[][2] = {
+        {{10.5f, 12.5f}, {150.5f, 140.5f}},  // diagonal
+        {{150.5f, 20.5f}, {8.5f, 130.5f}},   // diagonal, the other way
+        {{5.5f, 80.5f}, {155.5f, 80.5f}},    // horizontal
+        {{80.5f, 4.5f}, {80.5f, 156.5f}},    // vertical
+        {{20.5f, 20.5f}, {140.5f, 22.5f}},   // shallow (ends sit on pixel centers: a hard capsule snaps them)
+        {{-90.5f, -40.5f}, {260.5f, 210.5f}}, // runs far past the image on both ends
+        {{70.5f, 70.5f}, {70.5f, 70.5f}},    // a dot
+    };
+    for (const auto& e : ends) {
+        Image img(kSize, kSize, kWhite);
+        drawCapsule(img, e[0], e[1], radius, Paint{kBlack}, false);
+        const Vec2f d{e[1].x - e[0].x, e[1].y - e[0].y};
+        const float len2 = d.x * d.x + d.y * d.y;
+        int wrong = 0;
+        for (int y = 0; y < kSize; ++y) {
+            for (int x = 0; x < kSize; ++x) {
+                const float px = static_cast<float>(x) + 0.5f;
+                const float py = static_cast<float>(y) + 0.5f;
+                const float t = len2 > 0.0f ? std::clamp(((px - e[0].x) * d.x + (py - e[0].y) * d.y) / len2, 0.0f, 1.0f) : 0.0f;
+                const float cx = e[0].x + t * d.x - px;
+                const float cy = e[0].y + t * d.y - py;
+                const float dist = std::sqrt(cx * cx + cy * cy);
+                if (std::fabs(dist - radius) < 0.01f)
+                    continue; // on the edge, where float rounding may go either way
+                if ((dist < radius) != (img.get(x, y) == kBlack))
+                    ++wrong;
+            }
+        }
+        CHECK(wrong == 0);
+    }
+}
+
 TEST_CASE("Capsule can paint transparency") {
     Image img(9, 9, kWhite);
     drawCapsule(img, Vec2f{4.5f, 4.5f}, Vec2f{4.5f, 4.5f}, 2.0f, Paint{Rgba8{}, BlendMode::EraseAlpha}, false);
@@ -192,6 +230,36 @@ TEST_CASE("StrokeMask end resets it for the next stroke") {
 
     mask.begin(10, 10);
     CHECK(mask.get(5, 5) == 0);
+}
+
+TEST_CASE("StrokeMask keeps values across tile edges and on a size that is not a multiple of the tile") {
+    StrokeMask mask;
+    mask.begin(150, 130); // 64 x 64 tiles: the last ones are partial
+    const int xs[] = {0, 63, 64, 65, 127, 128, 149};
+    const int ys[] = {0, 63, 64, 129};
+    for (const int y : ys)
+        for (const int x : xs)
+            CHECK(mask.get(x, y) == 0); // nothing written yet, nothing allocated
+    int value = 1;
+    for (const int y : ys)
+        for (const int x : xs)
+            mask.set(x, y, static_cast<std::uint8_t>(value++));
+    value = 1;
+    for (const int y : ys)
+        for (const int x : xs)
+            CHECK(mask.get(x, y) == value++);
+    CHECK(mask.get(1, 1) == 0); // a neighbour in a written tile is still zero
+
+    mask.end();
+    for (const int y : ys)
+        for (const int x : xs)
+            CHECK(mask.get(x, y) == 0);
+
+    mask.set(70, 70, 0); // writing zero to an absent tile changes nothing
+    CHECK(mask.get(70, 70) == 0);
+    mask.set(70, 70, 9); // a tile reused from the last stroke starts clean
+    CHECK(mask.get(71, 70) == 0);
+    CHECK(mask.get(70, 70) == 9);
 }
 
 TEST_CASE("A mask of the wrong size is ignored instead of corrupting memory") {

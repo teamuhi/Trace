@@ -22,7 +22,7 @@ void applyPaint(Rgba8& pixel, const Paint& paint, unsigned coverage) noexcept {
 }
 
 // Paints every pixel of `box` (already inside the image). With a mask each pixel is painted once per stroke.
-void paintBox(Image& img, const IRect& box, const Paint& paint, StrokeMask* mask) noexcept {
+void paintBox(Image& img, const IRect& box, const Paint& paint, StrokeMask* mask) {
     for (int py = box.y0; py < box.y1; ++py) {
         const std::span<Rgba8> row = img.row(py);
         for (int px = box.x0; px < box.x1; ++px) {
@@ -113,8 +113,6 @@ IRect stampSquareLine(Image& img, int x0, int y0, int x1, int y1, int size, cons
         paintBox(img, box, paint, mask);
         touched = unionOf(touched, box);
     });
-    if (mask)
-        mask->markTouched(touched);
     return touched;
 }
 
@@ -127,27 +125,44 @@ IRect stampRect(Image& img, const IRect& rect, const Paint& paint, StrokeMask* m
     if (box.empty())
         return {};
     paintBox(img, box, paint, mask);
-    if (mask)
-        mask->markTouched(box);
     return box;
 }
 
 void StrokeMask::begin(int width, int height) {
     end();
+    spare_.reserve(kSpareTiles); // so end() can park tiles without allocating
     width = std::max(width, 0);
     height = std::max(height, 0);
-    if (width != width_ || height != height_) {
-        width_ = width;
-        height_ = height;
-        data_.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height), 0);
-    }
+    if (width == width_ && height == height_)
+        return;
+    width_ = width;
+    height_ = height;
+    tilesAcross_ = (width + kTileSide - 1) >> kTileBits;
+    const int tilesDown = (height + kTileSide - 1) >> kTileBits;
+    tiles_.clear();
+    tiles_.resize(static_cast<std::size_t>(tilesAcross_) * static_cast<std::size_t>(tilesDown));
 }
 
 void StrokeMask::end() noexcept {
-    const IRect r = intersectionOf(touched_, IRect{0, 0, width_, height_});
-    for (int y = r.y0; y < r.y1; ++y)
-        std::fill_n(data_.begin() + static_cast<std::ptrdiff_t>(index(r.x0, y)), r.width(), std::uint8_t{0});
-    touched_ = IRect{};
+    for (const std::size_t index : live_) {
+        std::unique_ptr<Tile>& slot = tiles_[index];
+        if (spare_.size() < kSpareTiles) {
+            slot->fill(0);
+            spare_.push_back(std::move(slot));
+        } else {
+            slot.reset();
+        }
+    }
+    live_.clear();
+}
+
+std::unique_ptr<StrokeMask::Tile> StrokeMask::takeTile() {
+    if (!spare_.empty()) {
+        std::unique_ptr<Tile> tile = std::move(spare_.back());
+        spare_.pop_back();
+        return tile;
+    }
+    return std::make_unique<Tile>(); // value-initialized: all zero
 }
 
 IRect drawCapsule(Image& img, Vec2f a, Vec2f b, float radius, const Paint& paint, bool antialias,
@@ -187,7 +202,34 @@ IRect drawCapsule(Image& img, Vec2f a, Vec2f b, float radius, const Paint& paint
     for (int y = y0; y < y1; ++y) {
         const std::span<Rgba8> row = img.row(y);
         const float py = static_cast<float>(y) + 0.5f;
-        for (int x = x0; x < x1; ++x) {
+
+        // Only the pixels this row can reach are tested. A pixel (x, py) is covered only when some point of the
+        // segment lies within `pad` of it, so |P.y - py| <= pad and |x - P.x| <= pad for that point P. That bounds x
+        // by the segment's own x range over the part of it that is within `pad` of the row. Without this a long
+        // diagonal segment (a fast stroke on a zoomed-out board spans many image pixels per mouse move) tests every
+        // pixel of its bounding box, a cost that grows with the square of its length. Pixels skipped here have no
+        // coverage anyway, so the result is the same.
+        int rx0 = x0;
+        int rx1 = x1;
+        if (aby != 0.0f) {
+            float t0 = (py - pad - a.y) / aby;
+            float t1 = (py + pad - a.y) / aby;
+            if (t0 > t1)
+                std::swap(t0, t1);
+            t0 = std::max(t0, 0.0f);
+            t1 = std::min(t1, 1.0f);
+            if (t0 > t1)
+                continue; // the segment never comes within `pad` of this row
+            const float xa = a.x + abx * t0;
+            const float xb = a.x + abx * t1;
+            // One pixel of slack on each side for the rounding of the divisions above.
+            rx0 = std::max(x0, static_cast<int>(std::floor(std::min(xa, xb) - pad)) - 1);
+            rx1 = std::min(x1, static_cast<int>(std::ceil(std::max(xa, xb) + pad)) + 1);
+        } else if (std::fabs(a.y - py) > pad) {
+            continue;
+        }
+
+        for (int x = rx0; x < rx1; ++x) {
             const float px = static_cast<float>(x) + 0.5f;
             float t = 0.0f;
             if (len2 > 0.0f)
@@ -222,8 +264,6 @@ IRect drawCapsule(Image& img, Vec2f a, Vec2f b, float radius, const Paint& paint
         }
     }
     const IRect touched{x0, y0, x1, y1};
-    if (mask)
-        mask->markTouched(touched);
     return touched;
 }
 

@@ -8,6 +8,7 @@ add_executable(trace_tests
     test_raster.cpp
     test_tools.cpp
     test_history.cpp
+    test_sparse_image.cpp
     test_image_io.cpp
     test_image_extra.cpp
     test_file_write.cpp

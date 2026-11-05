@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <map>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -8,6 +9,7 @@
 #include "core/cel_grid.hpp"
 #include "core/geometry.hpp"
 #include "core/image.hpp"
+#include "core/sparse_image.hpp"
 
 namespace trace {
 
@@ -17,7 +19,8 @@ namespace trace {
 // its size follows the edited area, not the image. Each stored tile holds the pixels of one side of the
 // change; undoing or redoing swaps those pixels with the image's, so one copy serves both directions.
 //
-// History never sees the tools. The caller keeps a `reference` image equal to the last committed state and
+// History never sees the tools. The caller keeps a `reference` (a SparseImage, which does not store blank tiles, so
+// a mostly empty whiteboard does not cost a second copy of itself) equal to the last committed state and
 // calls commit() with the region it touched: whatever differs inside that region becomes a step. A tool
 // can therefore not forget to record a pixel.
 //
@@ -25,7 +28,7 @@ namespace trace {
 // belong to, so the caller can make that cel active before undoing or redoing one that happened elsewhere.
 // And a *structure* step records a change to the layers and frames themselves (add, delete, duplicate,
 // reorder, merge, a property change, a resize of every cel): the layout before and after, plus the cel
-// images that the change removed (they live in the step until it is undone or evicted). Cels that a change
+// images that the change removed (they live in the step, without their blank tiles, until it is undone or evicted). Cels that a change
 // creates or modifies always get fresh ids, so a step never needs a pixel diff of a cel it did not touch.
 class History {
 public:
@@ -60,14 +63,14 @@ public:
     // as a new step and brings `reference` up to date. Discards any redo steps. Returns false, changing
     // nothing in the history, when nothing differs, the region is empty, the images' sizes disagree or they
     // differ from the size the history is at (a size change goes through commitReplace).
-    bool commit(const Image& current, Image& reference, const IRect& region, CelId cel = kNoCel);
+    bool commit(const Image& current, SparseImage& reference, const IRect& region, CelId cel = kNoCel);
 
     // Records a change of the whole image, such as a resize or a crop: `current` and `reference` (which must
     // already be equal, so commit any pending edit first) become `next`, and the step keeps the old image so
     // undo can bring it back. Costs one full image per step. Discards any redo steps. Returns false and
     // changes nothing when the images disagree or `next` is empty. May throw std::bad_alloc, again without
     // changing anything.
-    bool commitReplace(Image& current, Image& reference, Image next, CelId cel = kNoCel);
+    bool commitReplace(Image& current, SparseImage& reference, Image next, CelId cel = kNoCel);
 
     // Records a change to the layers and frames. `store` is the document's layout and cel pool; `reference`
     // mirrors its active cel. `next` is the layout after the change, `added` the new cel images it
@@ -76,20 +79,21 @@ public:
     // the new active cel. Returns false, changing nothing, when the arguments disagree (unknown or missing
     // ids, an invalid active position, sizes the history is not at). May throw std::bad_alloc, again without
     // changing anything. Pending pixel edits must be committed first. Discards any redo steps.
-    bool commitStructure(CelStore& store, Image& reference, Layout next, CelPool added);
+    bool commitStructure(CelStore& store, SparseImage& reference, Layout next, CelPool added);
 
     // Move `current` one step back or forward and keep `reference` in sync. Return the changed bounds,
     // empty when there was nothing to do or the images are not the size the steps belong to. Undoing or
-    // redoing a commitReplace step may throw std::bad_alloc, before anything is changed.
-    IRect undo(Image& current, Image& reference);
-    IRect redo(Image& current, Image& reference);
+    // redoing may throw std::bad_alloc (a replace step makes a copy of an image, any step may need room in
+    // `reference`), always before anything is changed.
+    IRect undo(Image& current, SparseImage& reference);
+    IRect redo(Image& current, SparseImage& reference);
 
     // The same for any kind of step, against a document's whole cel store. A Pixels or Replace step is
     // applied only when its cel is the active one (see peekUndo); a structure step restores the layout and
     // moves cels in or out of the pool, so references into the pool may be gone afterwards. Return the bounds
     // of the new active cel, empty when nothing happened. May throw std::bad_alloc before anything changes.
-    IRect undo(CelStore& store, Image& reference);
-    IRect redo(CelStore& store, Image& reference);
+    IRect undo(CelStore& store, SparseImage& reference);
+    IRect redo(CelStore& store, SparseImage& reference);
 
     // The saved state is the one a file on disk matches. It stops being reachable once a new commit
     // discards it or eviction drops the step that leads back to it.
@@ -107,7 +111,7 @@ private:
     struct StructureData {
         Layout before;
         Layout after;
-        CelPool held;                // the cels that are not in the document right now
+        std::map<CelId, SparseImage> held; // the cels that are not in the document right now (blank tiles not stored)
         std::vector<CelId> added;    // in `after` but not in `before` (sorted)
         std::vector<CelId> removed;  // in `before` but not in `after` (sorted)
     };
@@ -123,10 +127,10 @@ private:
         std::size_t bytes = 0;
     };
 
-    static IRect swapWithImage(Step& step, Image& current, Image& reference);
-    IRect swapWhole(Step& step, Image& current, Image& reference);
-    IRect swapStructure(Step& step, bool undoing, CelStore& store, Image& reference);
-    IRect applyStep(bool undoing, CelStore& store, Image& reference);
+    static IRect swapWithImage(Step& step, Image& current, SparseImage& reference);
+    IRect swapWhole(Step& step, Image& current, SparseImage& reference);
+    IRect swapStructure(Step& step, bool undoing, CelStore& store, SparseImage& reference);
+    IRect applyStep(bool undoing, CelStore& store, SparseImage& reference);
     static std::size_t structureBytes(const StructureData& data) noexcept;
     void discardRedo();
     void evictOldest();

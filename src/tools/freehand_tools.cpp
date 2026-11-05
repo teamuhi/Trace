@@ -128,10 +128,8 @@ private:
         cell.held = h.id;
         img.set(cell.x, cell.y, blendOver(h.before, paint.color));
         const IRect pixel{cell.x, cell.y, cell.x + 1, cell.y + 1};
-        if (mirrored && maskUsable(img)) {
+        if (mirrored && maskUsable(img))
             mask_.set(cell.x, cell.y, 255);
-            mask_.markTouched(pixel);
-        }
         return pixel;
     }
 

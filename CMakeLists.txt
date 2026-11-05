@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(Trace VERSION 0.1.0 LANGUAGES CXX C)
+project(Trace VERSION 0.1.1 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -65,6 +65,7 @@ add_library(trace_core STATIC
     src/core/raster.cpp
     src/core/board_export.cpp
     src/core/history.cpp
+    src/core/sparse_image.cpp
     src/core/selection.cpp
     src/core/ini.cpp
     src/core/keymap.cpp

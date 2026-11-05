@@ -1,6 +1,9 @@
 #pragma once
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "core/color.hpp"
@@ -27,26 +30,52 @@ class StrokeMask {
 public:
     // Prepares an all-zero mask for a width x height image, discarding any previous stroke.
     void begin(int width, int height);
-    // Zeroes the pixels touched since begin(), so the allocation can be reused by the next stroke.
+    // Zeroes the mask, so the next stroke starts clean. The tiles the stroke used are kept for reuse.
     void end() noexcept;
 
     int width() const noexcept { return width_; }
     int height() const noexcept { return height_; }
     bool matches(const Image& img) const noexcept { return width_ == img.width() && height_ == img.height(); }
 
-    std::uint8_t get(int x, int y) const noexcept { return data_[index(x, y)]; }
-    void set(int x, int y, std::uint8_t coverage) noexcept { data_[index(x, y)] = coverage; }
-    void markTouched(const IRect& r) noexcept { touched_ = unionOf(touched_, r); }
+    std::uint8_t get(int x, int y) const noexcept {
+        const Tile* tile = tiles_[tileIndex(x, y)].get();
+        return tile ? (*tile)[inTile(x, y)] : std::uint8_t{0};
+    }
+    void set(int x, int y, std::uint8_t coverage) {
+        std::unique_ptr<Tile>& slot = tiles_[tileIndex(x, y)];
+        if (!slot) {
+            if (coverage == 0)
+                return; // an absent tile already reads as zero
+            slot = takeTile();
+            live_.push_back(tileIndex(x, y));
+        }
+        (*slot)[inTile(x, y)] = coverage;
+    }
 
 private:
-    std::size_t index(int x, int y) const noexcept {
-        return static_cast<std::size_t>(y) * static_cast<std::size_t>(width_) + static_cast<std::size_t>(x);
+    // The mask is stored in 64 x 64 tiles that exist only where a stroke has written, so a stroke on a huge
+    // whiteboard costs memory in proportion to what it covers, not to the size of the board (a flat
+    // one-byte-per-pixel array was a quarter of the board's own size, once per freehand tool).
+    static constexpr int kTileBits = 6;
+    static constexpr int kTileSide = 1 << kTileBits;
+    static constexpr std::size_t kSpareTiles = 256; // zeroed tiles kept for the next stroke (1 MiB)
+    using Tile = std::array<std::uint8_t, static_cast<std::size_t>(kTileSide) * kTileSide>;
+
+    std::size_t tileIndex(int x, int y) const noexcept {
+        return static_cast<std::size_t>(y >> kTileBits) * static_cast<std::size_t>(tilesAcross_) +
+               static_cast<std::size_t>(x >> kTileBits);
     }
+    static std::size_t inTile(int x, int y) noexcept {
+        return (static_cast<std::size_t>(y & (kTileSide - 1)) << kTileBits) | static_cast<std::size_t>(x & (kTileSide - 1));
+    }
+    std::unique_ptr<Tile> takeTile();
 
     int width_ = 0;
     int height_ = 0;
-    std::vector<std::uint8_t> data_;
-    IRect touched_;
+    int tilesAcross_ = 0;
+    std::vector<std::unique_ptr<Tile>> tiles_; // one slot per tile, null where nothing was written
+    std::vector<std::size_t> live_;            // the slots written since begin(), so end() visits only those
+    std::vector<std::unique_ptr<Tile>> spare_; // zeroed tiles ready for reuse
 };
 
 // Calls `visit(x, y)` for every pixel of the Bresenham line from (x0, y0) to (x1, y1), both ends included,

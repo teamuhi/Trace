@@ -252,6 +252,26 @@ bool labeledNumber(Str label, const char* id, int& value, int minValue, int maxV
     return ImGui::DragInt(id, &value, 0.5f, minValue, maxValue, format, ImGuiSliderFlags_AlwaysClamp);
 }
 
+// A numeric text box: type the number, no slider and no +/- buttons, followed by its unit. The value is kept inside
+// minValue..maxValue while typing (an empty or too small entry counts as the minimum); the box itself shows what was
+// typed until it is left, then the clamped number.
+bool labeledNumberBox(Str label, const char* id, int& value, int minValue, int maxValue, const char* unit = "px") {
+    rowLabel(label);
+    const float unitWidth = ImGui::CalcTextSize(unit).x + ImGui::GetStyle().ItemSpacing.x;
+    ImGui::SetNextItemWidth(std::max(ImGui::GetFontSize() * 3.0f, ImGui::GetContentRegionAvail().x - unitWidth));
+    int shown = value;
+    bool changed = false;
+    if (ImGui::InputInt(id, &shown, 0, 0, ImGuiInputTextFlags_AutoSelectAll)) {
+        const int next = std::clamp(shown, minValue, maxValue);
+        changed = next != value;
+        value = next;
+    }
+    ImGui::SameLine();
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextDisabled("%s", unit);
+    return changed;
+}
+
 bool sameName(const std::string& a, const std::string& b) {
     return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
                return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y));
@@ -464,6 +484,14 @@ void drawBrushTip(ImDrawList* dl, ImVec2 center, float radius, BrushStyle style,
     }
 }
 
+// The brush and eraser size: a typed number box in Paint, a slider in Pixel Art (where sizes stop at 16 px).
+void brushSizeControl(ToolSettings& s, bool pixel) {
+    if (pixel)
+        labeledSlider(Str::OptSize, "##brushSize", s.brushSize, ToolSettings::kMinSize, ToolSettings::kMaxPixelSize);
+    else
+        labeledNumberBox(Str::OptSize, "##brushSize", s.brushSize, ToolSettings::kMinSize, ToolSettings::kMaxSize);
+}
+
 // The brush style menu: the tip (round, square, soft where the mode has antialiasing), its size, how soft the edge is
 // and antialiasing. It is what a right click on the Brush or Eraser button opens, and what the style button of the
 // options opens.
@@ -524,8 +552,7 @@ void drawBrushPopup(Toolbox& tools, bool pixel) {
     }
 
     ImGui::Dummy(ImVec2(0.0f, m.gap));
-    labeledSlider(Str::OptSize, "##brushSize", s.brushSize, ToolSettings::kMinSize,
-                  pixel ? ToolSettings::kMaxPixelSize : ToolSettings::kMaxSize);
+    brushSizeControl(s, pixel);
     if (!pixel) {
         ImGui::BeginDisabled(brushStyleOf(s) != BrushStyle::Soft || !s.antialias);
         labeledSlider(Str::OptHardness, "##brushHardness", s.brushHardness, ToolSettings::kMinHardness, 99, "%d%%");
@@ -550,7 +577,6 @@ void brushStyleButton(const ToolSettings& s, bool& openBrushMenu) {
 // pixel art options. The brush and eraser keep a size slider here; the rest of their tip lives in the brush style menu.
 void drawToolOptions(Toolbox& tools, bool pixel, bool& openBrushMenu) {
     ToolSettings& s = tools.settings();
-    const int maxBrush = pixel ? ToolSettings::kMaxPixelSize : ToolSettings::kMaxSize;
     const int maxStroke = pixel ? ToolSettings::kMaxPixelSize : ToolSettings::kMaxStrokeWidth;
 
     switch (tools.current()) {
@@ -562,11 +588,11 @@ void drawToolOptions(Toolbox& tools, bool pixel, bool& openBrushMenu) {
         ImGui::TextDisabled("%s", tr(Str::OptPencil));
         break;
     case ToolId::Brush:
-        labeledSlider(Str::OptSize, "##brushSize", s.brushSize, ToolSettings::kMinSize, maxBrush);
+        brushSizeControl(s, pixel);
         brushStyleButton(s, openBrushMenu);
         break;
     case ToolId::Eraser:
-        labeledSlider(Str::OptSize, "##brushSize", s.brushSize, ToolSettings::kMinSize, maxBrush);
+        brushSizeControl(s, pixel);
         brushStyleButton(s, openBrushMenu);
         if (pixel)
             hintWrapped(tr(Str::OptEraserAlways));
